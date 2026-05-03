@@ -1,0 +1,15 @@
+[Unit]
+Description=Hearth Network Intelligence Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hearth --config /etc/hearth/hearth.toml
+Restart=on-failure
+RestartSec=5s
+User=root
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

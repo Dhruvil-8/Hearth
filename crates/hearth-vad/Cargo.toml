@@ -1,0 +1,17 @@
+[package]
+name = "hearth-vad"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+
+[[bin]]
+name = "hearth-vad"
+path = "src/main.rs"

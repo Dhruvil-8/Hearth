@@ -1,0 +1,18 @@
+[package]
+name = "hearth-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+hearth-core = { path = "../hearth-core" }
+hearth-dashboard = { path = "../hearth-dashboard" }
+dns-lookup = "2.0"
+
+[[bin]]
+name = "hearth"
+path = "src/main.rs"

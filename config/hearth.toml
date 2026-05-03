@@ -1,0 +1,11 @@
+interface = "eth0"          # change to wlan0 if using WiFi
+dashboard_port = 7777
+db_path = "./hearth.db"
+oui_db_path = "./oui.csv"
+geoip_db_path = "./GeoLite2-Country.mmdb"
+
+# Add entries to give devices friendly names
+# [[devices]]
+# mac = "AA:BB:CC:DD:EE:FF"
+# label = "Samsung TV"
+# max_upload_per_hour_mb = 500
