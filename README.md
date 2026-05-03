@@ -1,6 +1,6 @@
 # Hearth
 
-**Local network intelligence. No cloud. No subscription. No surprises.**
+**Local network intelligence.**
 
 > [!IMPORTANT]
 > **Disclaimer**: This entire codebase — architecture, implementation, and documentation — was written by **Claude Opus 4.6 (Anthropic)** using **Antigravity IDE by Google**. This is a **prototype** and has **not been fully tested** in production environments. Use at your own risk. Contributions, bug reports, and testing are welcome.
@@ -68,7 +68,7 @@ graph TD
 ### Build
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/hearth.git
+git clone https://github.com/Dhruvil-8/Hearth.git
 cd hearth
 cargo build --release --workspace
 ```
