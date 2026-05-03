@@ -37,7 +37,7 @@ Thank you for considering contributing to Hearth.
 
 ```bash
 # Clone
-git clone https://github.com/YOUR_USERNAME/hearth.git
+git clone https://github.com/Dhruvil-8/hearth.git
 cd hearth
 
 # Build

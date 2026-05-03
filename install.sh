@@ -4,7 +4,7 @@
 # Install script for Debian/Ubuntu/Raspberry Pi OS
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/hearth/main/install.sh | sudo bash
+#   curl -sSL https://raw.githubusercontent.com/Dhruvil-8/hearth/main/install.sh | sudo bash
 #
 # Or clone and run locally:
 #   chmod +x install.sh && sudo ./install.sh
@@ -56,7 +56,7 @@ if [[ -f "$SCRIPT_DIR/Cargo.toml" ]]; then
 else
     TMPDIR=$(mktemp -d)
     echo "   Cloning repository..."
-    git clone --depth 1 https://github.com/YOUR_USERNAME/hearth.git "$TMPDIR/hearth"
+    git clone --depth 1 https://github.com/Dhruvil-8/hearth.git "$TMPDIR/hearth"
     cd "$TMPDIR/hearth"
 fi
 
