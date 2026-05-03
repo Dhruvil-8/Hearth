@@ -43,12 +43,12 @@ fn format_mac(bytes: &[u8]) -> String {
 
 /// Start the packet capture loop on the given network interface.
 ///
-/// Runs in a blocking `std::thread` — sends `Vec<DeviceSnapshot>` via the
+/// Runs in a blocking `std::thread` -- sends `Vec<DeviceSnapshot>` via the
 /// provided tokio mpsc channel every 60 seconds.
 ///
 /// # Arguments
-/// * `interface_name` — Name of the network interface to capture on
-/// * `tx` — Channel sender to emit device snapshots
+/// * `interface_name` -- Name of the network interface to capture on
+/// * `tx` -- Channel sender to emit device snapshots
 pub fn start_capture(
     interface_name: &str,
     tx: mpsc::Sender<Vec<DeviceSnapshot>>,
@@ -137,14 +137,15 @@ pub fn start_capture(
                     };
 
                     // Record bytes_sent for source device
-                    let src_entry = devices
-                        .entry(src_mac.clone())
-                        .or_insert_with(|| DeviceAccum {
-                            ip: src_ip,
-                            bytes_sent: 0,
-                            bytes_recv: 0,
-                            destinations: HashMap::new(),
-                        });
+                    let src_entry =
+                        devices
+                            .entry(src_mac.clone())
+                            .or_insert_with(|| DeviceAccum {
+                                ip: src_ip,
+                                bytes_sent: 0,
+                                bytes_recv: 0,
+                                destinations: HashMap::new(),
+                            });
                     src_entry.ip = src_ip;
                     src_entry.bytes_sent += frame_len;
                     *src_entry.destinations.entry(dst_ip).or_insert(0) += frame_len;
@@ -170,7 +171,8 @@ pub fn start_capture(
                 .drain()
                 .map(|(mac, accum)| {
                     // Sort destinations by bytes and take top 5
-                    let mut dest_vec: Vec<(IpAddr, u64)> = accum.destinations.into_iter().collect();
+                    let mut dest_vec: Vec<(IpAddr, u64)> =
+                        accum.destinations.into_iter().collect();
                     dest_vec.sort_by(|a, b| b.1.cmp(&a.1));
                     dest_vec.truncate(5);
 
