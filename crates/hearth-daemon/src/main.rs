@@ -7,8 +7,10 @@ use hearth_core::config;
 use hearth_core::dhcp_guard::DhcpGuard;
 use hearth_core::discovery::NetworkScanner;
 use hearth_core::dns::DnsSinkhole;
+use hearth_core::fleet::FleetManager;
 use hearth_core::geo::GeoIpDb;
 use hearth_core::oui::OuiDb;
+use hearth_core::pcap::PcapRingBuffer;
 use hearth_core::ra_guard::RaGuard;
 use hearth_core::scanner::PortScanner;
 use hearth_core::stats::StatsEngine;
@@ -75,8 +77,12 @@ async fn main() -> anyhow::Result<()> {
     let (snapshot_tx, mut snapshot_rx) = mpsc::channel::<Vec<DeviceSnapshot>>(64);
     let (anomaly_tx, mut anomaly_rx) = mpsc::channel::<Anomaly>(256);
 
-    // 7. Security guards & Deception Honeypot Canary engine
+    // 7. Security guards, Deception Canary engine, PCAP Forensics & Fleet Telemetry
     let canary_engine = Arc::new(CanaryEngine::new());
+    let pcap_ring_buffer = Arc::new(PcapRingBuffer::new(4096));
+
+    let fleet_manager = Arc::new(FleetManager::new(Arc::clone(&store), cfg.fleet.clone()));
+    fleet_manager.start_worker();
 
     let arp_guard = Arc::new(ArpGuard::new(
         Arc::clone(&store),
@@ -122,13 +128,15 @@ async fn main() -> anyhow::Result<()> {
         cfg.dashboard_port
     );
 
-    // 9. Spawn capture thread with Canary engine, RA-Guard, and DHCP-Guard attached
+    // 9. Spawn capture thread with Canary engine, RA-Guard, DHCP-Guard, and PCAP buffer attached
     let iface = cfg.interface.clone();
     let cap_tx = snapshot_tx.clone();
     let cap_anomaly_tx = anomaly_tx.clone();
     let cap_canary = Arc::clone(&canary_engine);
     let cap_ra = Arc::clone(&ra_guard);
     let cap_dhcp = Arc::clone(&dhcp_guard);
+    let cap_pcap = Arc::clone(&pcap_ring_buffer);
+    let cap_store = Arc::clone(&store);
     std::thread::spawn(move || {
         // Try real capture first, fall back to demo mode
         match start_capture(
@@ -138,6 +146,8 @@ async fn main() -> anyhow::Result<()> {
             Some(cap_canary),
             Some(cap_ra),
             Some(cap_dhcp),
+            Some(cap_pcap),
+            Some(cap_store),
         ) {
             Ok(()) => {}
             Err(e) => {
@@ -268,6 +278,9 @@ async fn main() -> anyhow::Result<()> {
     let auto_quarantine_rules = Arc::clone(&rules_engine);
     let auto_quarantine_arp_guard = Arc::clone(&arp_guard);
     let auto_quarantine_enabled = cfg.threat_intel.auto_quarantine;
+    let auto_pcap_buffer = Arc::clone(&pcap_ring_buffer);
+    let pcap_capture_enabled = cfg.pcap_capture_enabled;
+    let pcap_captures_dir = cfg.captures_dir.clone();
     let ai_analyst = Arc::new(AiAnalyst::new(cfg.ai_analyst.clone()));
     let ai_analyst_enabled = cfg.ai_analyst.enabled;
 
@@ -279,6 +292,30 @@ async fn main() -> anyhow::Result<()> {
                 anomaly.mac,
                 anomaly.detail
             );
+
+            // Zero-Day Forensics: Automatically dump rolling packet buffer to standard libpcap for Wireshark inspection
+            if pcap_capture_enabled {
+                match auto_pcap_buffer.dump_incident_pcap(
+                    &anomaly.mac,
+                    &pcap_captures_dir,
+                    &anomaly.kind.to_string(),
+                    anomaly.id,
+                ) {
+                    Ok(Some(capture_meta)) => {
+                        tracing::info!(
+                            "[FORENSICS] Generated Wireshark PCAP incident capture: {} ({} packets, {} bytes)",
+                            capture_meta.filename,
+                            capture_meta.packet_count,
+                            capture_meta.file_size_bytes
+                        );
+                        let _ = alert_store.insert_forensic_capture(&capture_meta);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!("Failed to generate incident PCAP dump: {}", e);
+                    }
+                }
+            }
 
             let label = alert_store
                 .get_device(&anomaly.mac)
@@ -385,6 +422,7 @@ async fn main() -> anyhow::Result<()> {
                 first_seen: now,
                 last_seen: now,
                 is_quarantined: false,
+                os_guess: None,
             };
             if let Err(e) = store.upsert_device(&device) {
                 tracing::error!("Failed to upsert device {}: {}", snap.mac, e);

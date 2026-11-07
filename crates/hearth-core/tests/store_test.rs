@@ -15,6 +15,7 @@ fn test_device_crud() {
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         is_quarantined: false,
+        os_guess: None,
     };
 
     store.upsert_device(&device).unwrap();
@@ -37,6 +38,7 @@ fn test_device_upsert_updates() {
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         is_quarantined: false,
+        os_guess: None,
     };
     store.upsert_device(&device1).unwrap();
 
@@ -48,6 +50,7 @@ fn test_device_upsert_updates() {
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         is_quarantined: false,
+        os_guess: None,
     };
     store.upsert_device(&device2).unwrap();
 
@@ -72,6 +75,7 @@ fn test_device_upsert_preserves_first_seen_and_existing_label() {
             first_seen,
             last_seen: first_last_seen,
             is_quarantined: false,
+            os_guess: None,
         })
         .unwrap();
 
@@ -84,6 +88,7 @@ fn test_device_upsert_preserves_first_seen_and_existing_label() {
             first_seen: new_last_seen,
             last_seen: new_last_seen,
             is_quarantined: false,
+            os_guess: None,
         })
         .unwrap();
 
@@ -109,6 +114,7 @@ fn test_traffic_sample_insert_and_query() {
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         is_quarantined: false,
+        os_guess: None,
     };
     store.upsert_device(&device).unwrap();
 
@@ -199,6 +205,7 @@ fn test_device_bytes_aggregation() {
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         is_quarantined: false,
+        os_guess: None,
     };
     store.upsert_device(&device).unwrap();
 
@@ -234,6 +241,7 @@ fn test_prune_old_samples() {
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         is_quarantined: false,
+        os_guess: None,
     };
     store.upsert_device(&device).unwrap();
 
@@ -275,6 +283,7 @@ fn test_device_exists_and_get_device() {
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         is_quarantined: false,
+        os_guess: None,
     };
     store.upsert_device(&device).unwrap();
 
@@ -296,6 +305,7 @@ fn test_device_ports_crud_and_insecure() {
         service: "Telnet".into(),
         is_insecure: true,
         discovered_at: Utc::now(),
+        banner: Some("Telnet login:".to_string()),
     };
     let port2 = DevicePort {
         mac: "AA:BB:CC:DD:EE:01".to_string(),
@@ -303,6 +313,7 @@ fn test_device_ports_crud_and_insecure() {
         service: "HTTP".into(),
         is_insecure: false,
         discovered_at: Utc::now(),
+        banner: None,
     };
 
     store.upsert_device_port(&port1).unwrap();
@@ -364,6 +375,7 @@ fn test_device_quarantine_crud() {
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         is_quarantined: false,
+        os_guess: None,
     };
     store.upsert_device(&device).unwrap();
 
@@ -457,6 +469,37 @@ fn test_dns_sinkhole_blocked_domains_and_queries() {
     assert_eq!(recent_queries.len(), 1);
     assert!(recent_queries[0].is_blocked);
     assert_eq!(recent_queries[0].domain, "malware-c2.evil.com");
+}
+
+#[test]
+fn test_forensic_captures_crud() {
+    let store = Store::new(":memory:").unwrap();
+
+    let capture = ForensicCapture {
+        id: None,
+        incident_id: Some(42),
+        mac: "AA:BB:CC:DD:EE:01".to_string(),
+        created_at: Utc::now(),
+        pcap_path: "./captures/test_incident.pcap".to_string(),
+        filename: "test_incident.pcap".to_string(),
+        packet_count: 150,
+        file_size_bytes: 14200,
+        trigger_anomaly: "CanaryTripDetected".to_string(),
+    };
+
+    let id = store.insert_forensic_capture(&capture).unwrap();
+    assert!(id > 0);
+
+    let list = store.get_forensic_captures(10).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].filename, "test_incident.pcap");
+    assert_eq!(list[0].packet_count, 150);
+
+    let fetched = store.get_forensic_capture_by_filename("test_incident.pcap").unwrap();
+    assert!(fetched.is_some());
+    let fetched = fetched.unwrap();
+    assert_eq!(fetched.trigger_anomaly, "CanaryTripDetected");
+    assert_eq!(fetched.file_size_bytes, 14200);
 }
 
 

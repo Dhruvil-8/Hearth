@@ -35,8 +35,15 @@ pub fn default_config() -> Config {
         geoip_db_path: if cfg!(windows) {
             "./GeoLite2-Country.mmdb".to_string()
         } else {
-            "/var/lib/hearth/GeoLite2-Country.mmdb".to_string()
+            "/var/log/hearth/GeoLite2-Country.mmdb".to_string()
         },
+        pcap_capture_enabled: true,
+        captures_dir: if cfg!(windows) {
+            "./captures".to_string()
+        } else {
+            "/var/log/hearth/captures".to_string()
+        },
+        fleet: Default::default(),
         notifications: Default::default(),
         threat_intel: Default::default(),
         dns: Default::default(),

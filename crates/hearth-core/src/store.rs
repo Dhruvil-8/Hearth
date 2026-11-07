@@ -1,6 +1,6 @@
 use crate::types::{
     Anomaly, AnomalyKind, Device, DevicePort, DeviceProfile, DnsQueryLog, DnsStats,
-    ThreatIntelEntry, TrafficSample,
+    ForensicCapture, ThreatIntelEntry, TrafficSample,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -125,6 +125,18 @@ impl Store {
                 block_reason TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS forensic_captures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                incident_id INTEGER,
+                mac TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                pcap_path TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                packet_count INTEGER NOT NULL,
+                file_size_bytes INTEGER NOT NULL,
+                trigger_anomaly TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_samples_mac_time ON traffic_samples(mac, timestamp);
             CREATE INDEX IF NOT EXISTS idx_anomalies_mac ON anomalies(mac);
             CREATE INDEX IF NOT EXISTS idx_ports_mac ON device_ports(mac);
@@ -132,13 +144,22 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_blocked_domains ON blocked_domains(domain);
             CREATE INDEX IF NOT EXISTS idx_dns_queries_time ON dns_queries(timestamp);
             CREATE INDEX IF NOT EXISTS idx_dns_queries_domain ON dns_queries(domain);
+            CREATE INDEX IF NOT EXISTS idx_captures_mac ON forensic_captures(mac);
             ",
         )
         .context("Failed to run database migrations")?;
 
-        // Safely add is_quarantined if older database exists without it
+        // Safely add columns if older database exists without them
         let _ = conn.execute(
             "ALTER TABLE devices ADD COLUMN is_quarantined INTEGER NOT NULL DEFAULT 0;",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE devices ADD COLUMN os_guess TEXT;",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE device_ports ADD COLUMN banner TEXT;",
             [],
         );
 
@@ -149,15 +170,16 @@ impl Store {
     pub fn upsert_device(&self, device: &Device) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO devices (mac, ip, vendor, label, first_seen, last_seen, is_quarantined)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO devices (mac, ip, vendor, label, first_seen, last_seen, is_quarantined, os_guess)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(mac) DO UPDATE SET
                 ip = excluded.ip,
                 vendor = COALESCE(excluded.vendor, devices.vendor),
                 label = COALESCE(excluded.label, devices.label),
                 first_seen = devices.first_seen,
                 last_seen = excluded.last_seen,
-                is_quarantined = COALESCE(devices.is_quarantined, excluded.is_quarantined)",
+                is_quarantined = COALESCE(devices.is_quarantined, excluded.is_quarantined),
+                os_guess = COALESCE(excluded.os_guess, devices.os_guess)",
             params![
                 device.mac,
                 device.ip.to_string(),
@@ -166,6 +188,7 @@ impl Store {
                 device.first_seen.to_rfc3339(),
                 device.last_seen.to_rfc3339(),
                 device.is_quarantined as i32,
+                device.os_guess,
             ],
         )?;
         Ok(())
@@ -193,7 +216,7 @@ impl Store {
     pub fn get_all_devices(&self) -> Result<Vec<Device>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
-            conn.prepare("SELECT mac, ip, vendor, label, first_seen, last_seen, is_quarantined FROM devices ORDER BY last_seen DESC")?;
+            conn.prepare("SELECT mac, ip, vendor, label, first_seen, last_seen, is_quarantined, os_guess FROM devices ORDER BY last_seen DESC")?;
         let devices = stmt
             .query_map([], |row| {
                 let ip_str: String = row.get(1)?;
@@ -214,10 +237,21 @@ impl Store {
                         .unwrap_or_default()
                         .with_timezone(&Utc),
                     is_quarantined: is_quarantined != 0,
+                    os_guess: row.get(7).ok(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(devices)
+    }
+
+    /// Update passive OS fingerprint guess for a device.
+    pub fn update_device_os_guess(&self, mac: &str, os_guess: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE devices SET os_guess = ?1 WHERE mac = ?2",
+            params![os_guess, mac],
+        )?;
+        Ok(())
     }
 
     /// Get traffic samples for a specific device within the last N hours.
@@ -509,7 +543,7 @@ impl Store {
     pub fn get_device(&self, mac: &str) -> Result<Option<Device>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT mac, ip, vendor, label, first_seen, last_seen, is_quarantined FROM devices WHERE mac = ?1",
+            "SELECT mac, ip, vendor, label, first_seen, last_seen, is_quarantined, os_guess FROM devices WHERE mac = ?1",
         )?;
         let mut rows = stmt.query_map(params![mac], |row| {
             let ip_str: String = row.get(1)?;
@@ -530,6 +564,7 @@ impl Store {
                     .unwrap_or_default()
                     .with_timezone(&Utc),
                 is_quarantined: is_quarantined != 0,
+                os_guess: row.get(7).ok(),
             })
         })?;
 
@@ -544,18 +579,20 @@ impl Store {
     pub fn upsert_device_port(&self, port: &DevicePort) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO device_ports (mac, port, service, is_insecure, discovered_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO device_ports (mac, port, service, is_insecure, discovered_at, banner)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(mac, port) DO UPDATE SET
                 service = excluded.service,
                 is_insecure = excluded.is_insecure,
-                discovered_at = excluded.discovered_at",
+                discovered_at = excluded.discovered_at,
+                banner = COALESCE(excluded.banner, device_ports.banner)",
             params![
                 port.mac,
                 port.port as i32,
                 port.service,
                 port.is_insecure as i32,
                 port.discovered_at.to_rfc3339(),
+                port.banner,
             ],
         )?;
         Ok(())
@@ -565,7 +602,7 @@ impl Store {
     pub fn get_ports_for_device(&self, mac: &str) -> Result<Vec<DevicePort>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT mac, port, service, is_insecure, discovered_at FROM device_ports WHERE mac = ?1 ORDER BY port ASC",
+            "SELECT mac, port, service, is_insecure, discovered_at, banner FROM device_ports WHERE mac = ?1 ORDER BY port ASC",
         )?;
         let ports = stmt
             .query_map(params![mac], |row| {
@@ -578,6 +615,7 @@ impl Store {
                     discovered_at: DateTime::parse_from_rfc3339(&disc_str)
                         .unwrap_or_default()
                         .with_timezone(&Utc),
+                    banner: row.get(5).ok(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -588,7 +626,7 @@ impl Store {
     pub fn get_all_insecure_ports(&self) -> Result<Vec<DevicePort>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT mac, port, service, is_insecure, discovered_at FROM device_ports WHERE is_insecure = 1 ORDER BY discovered_at DESC",
+            "SELECT mac, port, service, is_insecure, discovered_at, banner FROM device_ports WHERE is_insecure = 1 ORDER BY discovered_at DESC",
         )?;
         let ports = stmt
             .query_map([], |row| {
@@ -601,6 +639,7 @@ impl Store {
                     discovered_at: DateTime::parse_from_rfc3339(&disc_str)
                         .unwrap_or_default()
                         .with_timezone(&Utc),
+                    banner: row.get(5).ok(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -640,7 +679,7 @@ impl Store {
     pub fn get_quarantined_devices(&self) -> Result<Vec<Device>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT mac, ip, vendor, label, first_seen, last_seen, is_quarantined FROM devices WHERE is_quarantined = 1",
+            "SELECT mac, ip, vendor, label, first_seen, last_seen, is_quarantined, os_guess FROM devices WHERE is_quarantined = 1",
         )?;
         let devices = stmt
             .query_map([], |row| {
@@ -661,6 +700,7 @@ impl Store {
                         .unwrap_or_default()
                         .with_timezone(&Utc),
                     is_quarantined: true,
+                    os_guess: row.get(7).ok(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -889,5 +929,81 @@ impl Store {
                     .map(|dt| dt.with_timezone(&Utc))
             }),
         })
+    }
+
+    /// Record a newly generated incident PCAP forensic capture file.
+    pub fn insert_forensic_capture(&self, cap: &ForensicCapture) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO forensic_captures (incident_id, mac, created_at, pcap_path, filename, packet_count, file_size_bytes, trigger_anomaly)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                cap.incident_id,
+                cap.mac,
+                cap.created_at.to_rfc3339(),
+                cap.pcap_path,
+                cap.filename,
+                cap.packet_count as i64,
+                cap.file_size_bytes as i64,
+                cap.trigger_anomaly,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Retrieve recent forensic PCAP captures.
+    pub fn get_forensic_captures(&self, limit: usize) -> Result<Vec<ForensicCapture>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, incident_id, mac, created_at, pcap_path, filename, packet_count, file_size_bytes, trigger_anomaly
+             FROM forensic_captures ORDER BY id DESC LIMIT ?1",
+        )?;
+        let captures = stmt
+            .query_map(params![limit as i64], |row| {
+                let ts_str: String = row.get(3)?;
+                Ok(ForensicCapture {
+                    id: Some(row.get(0)?),
+                    incident_id: row.get(1)?,
+                    mac: row.get(2)?,
+                    created_at: DateTime::parse_from_rfc3339(&ts_str)
+                        .unwrap_or_default()
+                        .with_timezone(&Utc),
+                    pcap_path: row.get(4)?,
+                    filename: row.get(5)?,
+                    packet_count: row.get::<_, i64>(6)? as usize,
+                    file_size_bytes: row.get::<_, i64>(7)? as u64,
+                    trigger_anomaly: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(captures)
+    }
+
+    /// Find a forensic capture by filename.
+    pub fn get_forensic_capture_by_filename(&self, filename: &str) -> Result<Option<ForensicCapture>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, incident_id, mac, created_at, pcap_path, filename, packet_count, file_size_bytes, trigger_anomaly
+             FROM forensic_captures WHERE filename = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![filename])?;
+        if let Some(row) = rows.next()? {
+            let ts_str: String = row.get(3)?;
+            Ok(Some(ForensicCapture {
+                id: Some(row.get(0)?),
+                incident_id: row.get(1)?,
+                mac: row.get(2)?,
+                created_at: DateTime::parse_from_rfc3339(&ts_str)
+                    .unwrap_or_default()
+                    .with_timezone(&Utc),
+                pcap_path: row.get(4)?,
+                filename: row.get(5)?,
+                packet_count: row.get::<_, i64>(6)? as usize,
+                file_size_bytes: row.get::<_, i64>(7)? as u64,
+                trigger_anomaly: row.get(8)?,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 }

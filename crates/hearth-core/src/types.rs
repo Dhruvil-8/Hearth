@@ -20,6 +20,9 @@ pub struct Device {
     /// Whether this device has been isolated/quarantined from the network
     #[serde(default)]
     pub is_quarantined: bool,
+    /// Passive OS fingerprint guess (e.g. "Windows", "Linux / Android", "Apple iOS/macOS", "Embedded RTOS")
+    #[serde(default)]
+    pub os_guess: Option<String>,
 }
 
 /// One traffic observation — written to DB every 60 seconds per device.
@@ -154,6 +157,9 @@ pub struct DevicePort {
     pub service: String,
     pub is_insecure: bool,
     pub discovered_at: DateTime<Utc>,
+    /// Service banner or HTTP server header extracted during active probe
+    #[serde(default)]
+    pub banner: Option<String>,
 }
 
 /// Device profile — built from 72h of observation.
@@ -200,6 +206,15 @@ pub struct Config {
     /// Path to GeoLite2 MMDB database for country lookup
     #[serde(default = "default_geoip_db_path")]
     pub geoip_db_path: String,
+    /// Whether to maintain a rolling packet buffer and dump incident PCAPs on anomaly
+    #[serde(default = "default_true")]
+    pub pcap_capture_enabled: bool,
+    /// Directory to store incident PCAP capture dumps
+    #[serde(default = "default_captures_dir")]
+    pub captures_dir: String,
+    /// Multi-probe fleet telemetry and reporting
+    #[serde(default)]
+    pub fleet: FleetConfig,
     /// Notification settings (webhook)
     #[serde(default)]
     pub notifications: NotificationConfig,
@@ -215,6 +230,61 @@ pub struct Config {
     /// Per-device configuration
     #[serde(default)]
     pub devices: Vec<DeviceConfig>,
+}
+
+/// Forensic PCAP incident capture file metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForensicCapture {
+    pub id: Option<i64>,
+    pub incident_id: Option<i64>,
+    pub mac: String,
+    pub created_at: DateTime<Utc>,
+    pub pcap_path: String,
+    pub filename: String,
+    pub packet_count: usize,
+    pub file_size_bytes: u64,
+    pub trigger_anomaly: String,
+}
+
+/// Multi-probe fleet telemetry reporting configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub endpoint: Option<String>,
+    #[serde(default = "default_probe_id")]
+    pub probe_id: String,
+    pub api_token: Option<String>,
+    #[serde(default = "default_fleet_interval")]
+    pub sync_interval_seconds: u64,
+}
+
+impl Default for FleetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: None,
+            probe_id: default_probe_id(),
+            api_token: None,
+            sync_interval_seconds: default_fleet_interval(),
+        }
+    }
+}
+
+fn default_probe_id() -> String {
+    "hearth-probe-01".to_string()
+}
+
+fn default_fleet_interval() -> u64 {
+    300
+}
+
+fn default_captures_dir() -> String {
+    if cfg!(windows) {
+        "./captures".to_string()
+    } else {
+        "/var/log/hearth/captures".to_string()
+    }
 }
 
 /// Threat intelligence feed and matching configuration.

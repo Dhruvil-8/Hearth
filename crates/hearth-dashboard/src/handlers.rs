@@ -504,3 +504,46 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
         body,
     )
 }
+
+/// GET /api/forensics/captures — List incident PCAP forensic dumps
+pub async fn forensic_captures(State(state): State<AppState>) -> impl IntoResponse {
+    let captures = state.store.get_forensic_captures(100).unwrap_or_default();
+    Json(captures)
+}
+
+/// GET /api/forensics/captures/:filename — Download raw PCAP file for Wireshark inspection
+pub async fn download_forensic_capture(
+    Path(filename): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    // Path traversal defense (CWE-22)
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return (StatusCode::BAD_REQUEST, "Invalid capture filename").into_response();
+    }
+
+    let capture = match state.store.get_forensic_capture_by_filename(&filename) {
+        Ok(Some(cap)) => cap,
+        _ => return (StatusCode::NOT_FOUND, "Capture not found in forensic index").into_response(),
+    };
+
+    match tokio::fs::read(&capture.pcap_path).await {
+        Ok(bytes) => (
+            [
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "application/vnd.tcpdump.pcap",
+                ),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    &format!("attachment; filename=\"{}\"", filename),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to read PCAP capture file {}: {}", capture.pcap_path, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read PCAP file from disk").into_response()
+        }
+    }
+}

@@ -21,6 +21,7 @@ fn setup_with_mature_profile() -> (Arc<Store>, tokio::sync::mpsc::Receiver<Anoma
             first_seen: Utc::now(),
             last_seen: Utc::now(),
             is_quarantined: false,
+            os_guess: None,
         })
         .unwrap();
 
@@ -189,6 +190,7 @@ async fn test_no_anomaly_for_immature_profile() {
             first_seen: Utc::now(),
             last_seen: Utc::now(),
             is_quarantined: false,
+            os_guess: None,
         })
         .unwrap();
 

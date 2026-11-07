@@ -204,6 +204,7 @@ impl NetworkScanner {
                 first_seen: now,
                 last_seen: now,
                 is_quarantined: false,
+                os_guess: None,
             };
 
             let _ = self.store.upsert_device(&device);

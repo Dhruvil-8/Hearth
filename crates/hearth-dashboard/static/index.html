@@ -218,6 +218,16 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
       </tr></thead>
       <tbody id="sec-ports-tbody"></tbody>
     </table>
+
+    <div class="table-header-row" style="margin-top:2rem">
+      <h2>Incident Forensics & Wireshark PCAP Captures</h2>
+    </div>
+    <table class="device-table">
+      <thead><tr>
+        <th>Created</th><th>Device MAC</th><th>Trigger Anomaly</th><th>Packet Count</th><th>Size</th><th>Action</th>
+      </tr></thead>
+      <tbody id="forensics-tbody"></tbody>
+    </table>
   </div>
 </div>
 
@@ -413,7 +423,7 @@ async function fetchDevices() {
       const tr = document.createElement('tr');
       tr.onclick = () => toggleDetail(d.mac);
       tr.innerHTML = `
-        <td><strong>${esc(name)}</strong><br><span class="mac">${esc(d.mac)}</span></td>
+        <td><strong>${esc(name)}</strong><br><span class="mac">${esc(d.mac)}</span>${d.os_guess ? ` <span class="badge" style="background:#2563eb;color:#fff;font-size:0.65rem;margin-left:4px">${esc(d.os_guess)}</span>` : ''}</td>
         <td class="hide-mobile">${esc(d.vendor || '—')}</td>
         <td><span class="mac">${esc(d.ip)}</span></td>
         <td class="bytes">${humanBytes(d.bytes_sent_last_hour)}</td>
@@ -484,8 +494,9 @@ async function toggleDetail(mac) {
       const ports = await r.json();
       if (ports.length > 0) {
         document.getElementById('device-ports-list').innerHTML = ports.map(p => `
-          <div style="margin-bottom:.4rem;font-family:var(--mono);font-size:.8rem">
+          <div style="margin-bottom:.5rem;font-family:var(--mono);font-size:.8rem">
             Port ${p.port} (${esc(p.service)}) — ${p.is_insecure ? '<span class="badge badge-danger">CRITICAL: Insecure</span>' : '<span class="badge badge-success">Active</span>'}
+            ${p.banner ? `<br><small style="color:var(--accent);word-break:break-all">Banner: ${esc(p.banner)}</small>` : ''}
           </div>`).join('');
       } else {
         document.getElementById('device-ports-list').innerHTML = '<p style="color:var(--text-muted);font-size:.85rem">No standard management ports open.</p>';
@@ -519,11 +530,31 @@ async function loadSecurity() {
         <tr>
           <td><span class="mac">${esc(p.mac)}</span></td>
           <td><strong>${p.port}</strong></td>
-          <td>${esc(p.service)}</td>
+          <td>${esc(p.service)}${p.banner ? `<br><small style="color:var(--text-muted)">${esc(p.banner)}</small>` : ''}</td>
           <td><span class="badge badge-danger">High Risk</span></td>
           <td style="color:var(--text-muted);font-size:.8rem">${new Date(p.discovered_at).toLocaleString()}</td>
         </tr>`).join('');
     }
+
+    try {
+      const fr = await authFetch('/api/forensics/captures');
+      const fc = await fr.json();
+      const ftbody = document.getElementById('forensics-tbody');
+      if (!fc || fc.length === 0) {
+        ftbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted);text-align:center;padding:1.5rem">No incident PCAP captures recorded yet. Hearth will automatically generate PCAP captures when high-risk anomalies occur.</td></tr>';
+      } else {
+        ftbody.innerHTML = fc.map(c => `
+          <tr>
+            <td>${new Date(c.created_at).toLocaleString()}</td>
+            <td><span class="mac">${esc(c.mac)}</span></td>
+            <td><span class="badge badge-danger">${esc(c.trigger_anomaly)}</span></td>
+            <td>${c.packet_count} packets</td>
+            <td>${humanBytes(c.file_size_bytes)}</td>
+            <td><a href="/api/forensics/captures/${encodeURIComponent(c.filename)}" class="resolve-btn" style="text-decoration:none;display:inline-block" download>Download PCAP</a></td>
+          </tr>
+        `).join('');
+      }
+    } catch(e) {}
   } catch(e) {}
 }
 

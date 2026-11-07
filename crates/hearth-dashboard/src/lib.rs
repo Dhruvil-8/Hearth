@@ -156,6 +156,11 @@ pub async fn serve(port: u16, store: Arc<Store>, config: Config) -> anyhow::Resu
         .route("/dns/stats", get(handlers::dns_stats))
         .route("/dns/queries", get(handlers::dns_queries))
         .route("/metrics", get(handlers::metrics))
+        .route("/forensics/captures", get(handlers::forensic_captures))
+        .route(
+            "/forensics/captures/:filename",
+            get(handlers::download_forensic_capture),
+        )
         .route("/ai/status", get(handlers::ai_status))
         .route("/ai/investigate/:mac", post(handlers::ai_investigate_device))
         .layer(middleware::from_fn_with_state(state.clone(), require_api_key));

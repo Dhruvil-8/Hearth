@@ -494,6 +494,9 @@ mod tests {
             threat_intel: Default::default(),
             dns: Default::default(),
             ai_analyst: Default::default(),
+            pcap_capture_enabled: true,
+            captures_dir: "./captures".into(),
+            fleet: Default::default(),
             devices: vec![],
         };
         let store = Arc::new(Store::new(":memory:").unwrap());
@@ -530,6 +533,9 @@ mod tests {
             threat_intel: Default::default(),
             dns: Default::default(),
             ai_analyst: Default::default(),
+            pcap_capture_enabled: true,
+            captures_dir: "./captures".into(),
+            fleet: Default::default(),
             devices: vec![],
         };
         let store = Arc::new(Store::new(":memory:").unwrap());

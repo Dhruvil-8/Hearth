@@ -23,6 +23,22 @@ oui_db_path = "./oui.csv"
 # Path to MaxMind GeoLite2 Country MMDB for destination country lookups
 geoip_db_path = "./GeoLite2-Country.mmdb"
 
+# Automated Incident Forensics & Wireshark PCAP Capture
+# When true, maintains a rolling in-memory packet ring buffer and automatically writes
+# standard Wireshark-compatible .pcap captures to `captures_dir` whenever high-risk anomalies trip
+pcap_capture_enabled = true
+captures_dir = "./captures"
+
+# Multi-Probe Enterprise Fleet Telemetry & Central Cloud Reporting
+# Enables distributed deployment where multiple Hearth probes (e.g. branch offices, home subnets)
+# report summarized health, anomaly telemetry, and asset inventory back to a central console
+[fleet]
+enabled = false
+# endpoint = "https://fleet.hearth-security.com/api/v1/telemetry"
+probe_id = "hearth-probe-01"
+# api_token = "secret-probe-token"
+sync_interval_seconds = 300
+
 # Notification Webhooks (Discord, Slack, or generic HTTP POST) and SIEM Exporter
 [notifications]
 # webhook_url = "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"

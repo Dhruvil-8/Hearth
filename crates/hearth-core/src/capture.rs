@@ -53,6 +53,8 @@ pub fn start_capture(
     canary_engine: Option<std::sync::Arc<crate::canary::CanaryEngine>>,
     ra_guard: Option<std::sync::Arc<crate::ra_guard::RaGuard>>,
     dhcp_guard: Option<std::sync::Arc<crate::dhcp_guard::DhcpGuard>>,
+    pcap_buffer: Option<std::sync::Arc<crate::pcap::PcapRingBuffer>>,
+    store: Option<std::sync::Arc<crate::store::Store>>,
 ) -> anyhow::Result<()> {
     let interfaces = datalink::interfaces();
     let interface = interfaces
@@ -113,6 +115,16 @@ pub fn start_capture(
                     let dst_mac = format_mac(&eth.get_destination().octets());
                     let frame_len = packet.len() as u64;
 
+                    // Push raw packet into circular PCAP ring buffer for zero-day incident digital forensics
+                    if let Some(ref pcap_buf) = pcap_buffer {
+                        pcap_buf.push(crate::pcap::RawCapturedPacket {
+                            timestamp: std::time::SystemTime::now(),
+                            src_mac: src_mac.clone(),
+                            dst_mac: dst_mac.clone(),
+                            raw_bytes: packet.to_vec(),
+                        });
+                    }
+
                     // Extract IP layer info
                     let (src_ip, dst_ip) = match eth.get_ethertype() {
                         EtherTypes::Ipv4 => {
@@ -120,6 +132,20 @@ pub fn start_capture(
                                 if let Some(ref a_tx) = anomaly_tx {
                                     if ipv4.get_next_level_protocol() == IpNextHeaderProtocols::Tcp {
                                         if let Some(tcp) = TcpPacket::new(ipv4.payload()) {
+                                            // Passive OS Fingerprinting via TCP SYN flags (SYN=1, ACK=0)
+                                            let is_syn_only = (tcp.get_flags() & 0x12) == 0x02;
+                                            if is_syn_only {
+                                                if let Some(os) = crate::os_fingerprint::OsFingerprinter::classify_syn(
+                                                    ipv4.get_ttl(),
+                                                    tcp.get_window(),
+                                                    true,
+                                                ) {
+                                                    if let Some(ref st) = store {
+                                                        let _ = st.update_device_os_guess(&src_mac, &os.to_string());
+                                                    }
+                                                }
+                                            }
+
                                             // Zero-Day Deception: Check lateral movement / worm propagation against sensitive ports & canaries
                                             if let Some(canary_anomaly) = canary_engine.inspect_lateral_traffic(
                                                 &src_mac,
@@ -192,6 +218,19 @@ pub fn start_capture(
                                 if let Some(ref a_tx) = anomaly_tx {
                                     if ipv6.get_next_header() == IpNextHeaderProtocols::Tcp {
                                         if let Some(tcp) = TcpPacket::new(ipv6.payload()) {
+                                            let is_syn_only = (tcp.get_flags() & 0x12) == 0x02;
+                                            if is_syn_only {
+                                                if let Some(os) = crate::os_fingerprint::OsFingerprinter::classify_syn(
+                                                    ipv6.get_hop_limit(),
+                                                    tcp.get_window(),
+                                                    true,
+                                                ) {
+                                                    if let Some(ref st) = store {
+                                                        let _ = st.update_device_os_guess(&src_mac, &os.to_string());
+                                                    }
+                                                }
+                                            }
+
                                             if let Some(anomaly) = crate::ja3::inspect_tls_traffic(
                                                 tcp.payload(),
                                                 &src_mac,
