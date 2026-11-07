@@ -38,6 +38,7 @@ pub fn default_config() -> Config {
         notifications: Default::default(),
         threat_intel: Default::default(),
         dns: Default::default(),
+        ai_analyst: Default::default(),
         devices: Vec::new(),
     }
 }

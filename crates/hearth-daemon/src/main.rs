@@ -1,3 +1,4 @@
+use hearth_core::ai_analyst::AiAnalyst;
 use hearth_core::alerts::AlertDispatcher;
 use hearth_core::arp_guard::ArpGuard;
 use hearth_core::capture::{start_capture, start_demo_capture, DeviceSnapshot};
@@ -232,6 +233,9 @@ async fn main() -> anyhow::Result<()> {
     let auto_quarantine_rules = Arc::clone(&rules_engine);
     let auto_quarantine_arp_guard = Arc::clone(&arp_guard);
     let auto_quarantine_enabled = cfg.threat_intel.auto_quarantine;
+    let ai_analyst = Arc::new(AiAnalyst::new(cfg.ai_analyst.clone()));
+    let ai_analyst_enabled = cfg.ai_analyst.enabled;
+
     tokio::spawn(async move {
         while let Some(anomaly) = anomaly_rx.recv().await {
             tracing::warn!(
@@ -241,10 +245,53 @@ async fn main() -> anyhow::Result<()> {
                 anomaly.detail
             );
 
-            // Autonomous self-defense quarantine:
-            // If configured, isolate non-infrastructure devices upon confirmed C2 botnet contact,
-            // zero-day DGA / DNS tunneling, or lateral movement canary honeypot trips.
-            if auto_quarantine_enabled
+            let label = alert_store
+                .get_device(&anomaly.mac)
+                .ok()
+                .flatten()
+                .and_then(|d| d.label);
+
+            let is_gateway = auto_quarantine_arp_guard.is_known_gateway_mac(&anomaly.mac).await;
+
+            // 1. Optional Hybrid "Reflex + Brain" AI Investigation:
+            // If user enabled AI Analyst, submit sanitized incident dossier to the configured local/API LLM.
+            let mut ai_handled_quarantine = false;
+            if ai_analyst_enabled {
+                tracing::info!("🤖 Invoking AI Analyst for anomaly on device {}...", anomaly.mac);
+                match ai_analyst.evaluate_incident(&anomaly, label.as_deref(), None).await {
+                    Ok(decision) => {
+                        tracing::info!(
+                            "🧠 AI Analyst Assessment [{}]: Confidence={:.2}, Severity={:?}, Action={:?}\nReasoning: {}",
+                            anomaly.mac,
+                            decision.confidence,
+                            decision.threat_severity,
+                            decision.recommended_action,
+                            decision.reasoning
+                        );
+
+                        let guardrail_eval = ai_analyst.validate_guardrails(&anomaly.mac, &decision, is_gateway);
+                        if guardrail_eval.allowed_to_quarantine {
+                            tracing::warn!(
+                                "🛡️ AI AUTONOMOUS QUARANTINE EXECUTING: Device {} isolated based on verified high-confidence AI reasoning!",
+                                anomaly.mac
+                            );
+                            if let Err(e) = auto_quarantine_rules.quarantine_device(&anomaly.mac).await {
+                                tracing::error!("Failed to execute AI quarantine for {}: {}", anomaly.mac, e);
+                            }
+                            ai_handled_quarantine = true;
+                        } else if let Some(veto) = guardrail_eval.veto_reason {
+                            tracing::info!("🛡️ Guardrail Veto for {}: {}", anomaly.mac, veto);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("AI Analyst offline or timed out: {}. Gracefully falling back to deterministic reflex rules.", e);
+                    }
+                }
+            }
+
+            // 2. Deterministic reflex quarantine (fallback or when AI is disabled):
+            if !ai_handled_quarantine
+                && auto_quarantine_enabled
                 && (anomaly.kind == AnomalyKind::MaliciousDest
                     || anomaly.kind == AnomalyKind::MaliciousTlsFingerprint
                     || anomaly.kind == AnomalyKind::CanaryTripDetected
@@ -254,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
                 let is_critical_infra = anomaly.mac == "00:00:00:00:00:00"
                     || anomaly.mac == "FF:FF:FF:FF:FF:FF"
                     || anomaly.mac.eq_ignore_ascii_case("UNKNOWN")
-                    || auto_quarantine_arp_guard.is_known_gateway_mac(&anomaly.mac).await;
+                    || is_gateway;
 
                 if is_critical_infra {
                     tracing::error!(
@@ -263,7 +310,7 @@ async fn main() -> anyhow::Result<()> {
                     );
                 } else {
                     tracing::warn!(
-                        "🚨 AUTONOMOUS DEFENSE TRIGGERED: Auto-quarantining device {} due to confirmed C2 botnet threat ({})!",
+                        "🚨 AUTONOMOUS DEFENSE TRIGGERED: Auto-quarantining device {} due to confirmed threat ({})!",
                         anomaly.mac, anomaly.kind
                     );
                     if let Err(e) = auto_quarantine_rules.quarantine_device(&anomaly.mac).await {
@@ -271,12 +318,6 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-
-            let label = alert_store
-                .get_device(&anomaly.mac)
-                .ok()
-                .flatten()
-                .and_then(|d| d.label);
 
             if let Err(e) = alert_dispatcher.dispatch(&anomaly, label.as_deref()).await {
                 tracing::error!("Failed to dispatch webhook alert: {}", e);

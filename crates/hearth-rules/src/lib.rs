@@ -449,6 +449,7 @@ mod tests {
             notifications: Default::default(),
             threat_intel: Default::default(),
             dns: Default::default(),
+            ai_analyst: Default::default(),
             devices: vec![],
         };
         let store = Arc::new(Store::new(":memory:").unwrap());
@@ -481,6 +482,7 @@ mod tests {
             notifications: Default::default(),
             threat_intel: Default::default(),
             dns: Default::default(),
+            ai_analyst: Default::default(),
             devices: vec![],
         };
         let store = Arc::new(Store::new(":memory:").unwrap());

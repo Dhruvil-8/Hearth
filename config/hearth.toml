@@ -59,6 +59,48 @@ blocklists = [
     "https://urlhaus.abuse.ch/downloads/hostfile/",
 ]
 
+# Autonomous AI Security Analyst (Hybrid "Reflex + Brain" Architecture)
+# Completely OPTIONAL and provider-agnostic / model-agnostic:
+# - Leave `enabled = false` to run pure, lightweight deterministic Rust defense (zero AI overhead).
+# - Set `enabled = true` to activate AI-driven forensic investigation on detected anomalies.
+# - Connects to ANY local inference server (Ollama, vLLM, llama.cpp, SGLang) OR cloud API (OpenAI, Groq, OpenRouter).
+# - Completely model-agnostic: use any model class you prefer (3B, 8B, 70B, 80B, 100B+, 405B).
+[ai_analyst]
+enabled = false
+# Universal OpenAI-compatible chat completions endpoint:
+# Local examples:
+#   endpoint = "http://localhost:11434/v1/chat/completions"     # Ollama
+#   endpoint = "http://localhost:8000/v1/chat/completions"      # vLLM / llama.cpp / LocalAI
+# Cloud examples:
+#   endpoint = "https://api.openai.com/v1/chat/completions"     # OpenAI
+#   endpoint = "https://api.groq.com/openai/v1/chat/completions"# Groq
+endpoint = "http://localhost:11434/v1/chat/completions"
+
+# Model name: Choose any model size or provider:
+# Local: "llama3.3:70b", "deepseek-r1:70b", "qwen2.5:72b", "mistral:latest", "llama-3.1:405b"
+# Cloud: "gpt-4o", "claude-3-5-sonnet", "llama-3.3-70b-versatile"
+model = "llama3.3:70b"
+
+# API Key (leave empty for open local servers like Ollama/llama.cpp; fill for cloud APIs)
+# api_key = "sk-..."
+
+# Timeout in seconds (accommodates heavy 70B-100B+ reasoning chains)
+timeout_seconds = 60
+
+# Autonomous action switch:
+# - false: AI performs forensic reasoning and alert enrichment only (manual admin approval required).
+# - true: AI can trigger proactive quarantine within strict deterministic guardrails.
+autonomous_action = false
+
+# Minimum AI confidence score (0.0 to 1.0) required before any autonomous action is permitted
+confidence_threshold = 0.85
+
+# Static list of protected MAC addresses the AI is strictly forbidden from ever isolating
+# (e.g. administrator laptops, core hypervisors, NAS)
+protected_macs = [
+    # "00:11:22:33:44:55",
+]
+
 # Friendly device names and soft-blocking enforcement rules
 # [[devices]]
 # mac = "AA:BB:CC:DD:EE:FF"

@@ -205,6 +205,9 @@ pub struct Config {
     /// DNS threat sinkhole configuration
     #[serde(default)]
     pub dns: DnsConfig,
+    /// Autonomous AI Security Analyst configuration (Local LLM or API-based)
+    #[serde(default)]
+    pub ai_analyst: AiAnalystConfig,
     /// Per-device configuration
     #[serde(default)]
     pub devices: Vec<DeviceConfig>,
@@ -402,3 +405,69 @@ fn default_geoip_db_path() -> String {
         "/var/lib/hearth/GeoLite2-Country.mmdb".to_string()
     }
 }
+
+/// Configuration for the Autonomous AI Security Analyst.
+///
+/// Completely provider-agnostic and model-agnostic:
+/// - Works with Local Inference: Ollama, vLLM, llama.cpp, LocalAI, SGLang, or private clusters (e.g. 70B, 80B, 100B+, 405B models)
+/// - Works with Cloud/Hosted APIs: OpenAI, Groq, OpenRouter, Mistral, Together AI, Azure OpenAI, etc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiAnalystConfig {
+    /// Enable or disable autonomous AI investigation
+    #[serde(default)]
+    pub enabled: bool,
+    /// Universal OpenAI-compatible chat completions endpoint URL
+    /// Local examples: "http://localhost:11434/v1/chat/completions" (Ollama), "http://192.168.1.50:8000/v1/chat/completions" (vLLM)
+    /// API examples: "https://api.openai.com/v1/chat/completions", "https://api.groq.com/openai/v1/chat/completions"
+    #[serde(default = "default_ai_endpoint")]
+    pub endpoint: String,
+    /// Target model identifier (User-selected, e.g. "llama3.3:70b", "deepseek-r1:70b", "qwen2.5:72b", "gpt-4o", "llama-3.1-405b")
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    /// Optional Bearer API key (required for cloud APIs or authenticated local proxies; leave None for open local servers)
+    pub api_key: Option<String>,
+    /// Request timeout in seconds (default 60s, accommodates heavy 70B-100B+ reasoning chains)
+    #[serde(default = "default_ai_timeout")]
+    pub timeout_seconds: u64,
+    /// Whether the AI Analyst is authorized to take proactive quarantine actions within strict deterministic guardrails
+    #[serde(default)]
+    pub autonomous_action: bool,
+    /// Minimum confidence threshold (0.0 to 1.0) required to trigger proactive quarantine (default 0.85)
+    #[serde(default = "default_ai_confidence_threshold")]
+    pub confidence_threshold: f64,
+    /// Static list of MAC addresses the AI is strictly forbidden from ever isolating (e.g. admin laptops, servers)
+    #[serde(default)]
+    pub protected_macs: Vec<String>,
+}
+
+impl Default for AiAnalystConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_ai_endpoint(),
+            model: default_ai_model(),
+            api_key: None,
+            timeout_seconds: default_ai_timeout(),
+            autonomous_action: false,
+            confidence_threshold: default_ai_confidence_threshold(),
+            protected_macs: Vec::new(),
+        }
+    }
+}
+
+fn default_ai_endpoint() -> String {
+    "http://localhost:11434/v1/chat/completions".to_string()
+}
+
+fn default_ai_model() -> String {
+    "llama3.3:70b".to_string()
+}
+
+fn default_ai_timeout() -> u64 {
+    60
+}
+
+fn default_ai_confidence_threshold() -> f64 {
+    0.85
+}
+

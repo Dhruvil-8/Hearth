@@ -1,3 +1,4 @@
+pub mod ai_analyst;
 pub mod alerts;
 pub mod arp_guard;
 pub mod canary;
