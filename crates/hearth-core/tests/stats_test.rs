@@ -9,7 +9,7 @@ use std::sync::Arc;
 /// Helper to create a store with a mature profile for testing anomaly detection.
 fn setup_with_mature_profile() -> (Arc<Store>, tokio::sync::mpsc::Receiver<Anomaly>) {
     let store = Arc::new(Store::new(":memory:").unwrap());
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let (_tx, rx) = tokio::sync::mpsc::channel(64);
 
     // Create device
     store
@@ -20,6 +20,7 @@ fn setup_with_mature_profile() -> (Arc<Store>, tokio::sync::mpsc::Receiver<Anoma
             label: Some("Test Device".into()),
             first_seen: Utc::now(),
             last_seen: Utc::now(),
+            is_quarantined: false,
         })
         .unwrap();
 
@@ -62,7 +63,7 @@ fn setup_with_mature_profile() -> (Arc<Store>, tokio::sync::mpsc::Receiver<Anoma
 
 #[tokio::test]
 async fn test_excessive_upload_anomaly() {
-    let (store, mut rx) = setup_with_mature_profile();
+    let (store, _rx) = setup_with_mature_profile();
     let (atx, _) = tokio::sync::mpsc::channel(64);
     let engine = StatsEngine::new(store.clone(), atx);
 
@@ -187,6 +188,7 @@ async fn test_no_anomaly_for_immature_profile() {
             label: None,
             first_seen: Utc::now(),
             last_seen: Utc::now(),
+            is_quarantined: false,
         })
         .unwrap();
 

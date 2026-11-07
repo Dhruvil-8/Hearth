@@ -2,25 +2,27 @@
 
 **Local network intelligence.**
 
-> [!IMPORTANT]
-> **Disclaimer**: This entire codebase — architecture, implementation, and documentation — was written by **Claude Opus 4.6 (Anthropic)** using **Antigravity IDE by Google**. This is a **prototype** and has **not been fully tested** in production environments. Use at your own risk. Contributions, bug reports, and testing are welcome.
-
+> [!WARNING]
+> **Experimental / AI-Generated Codebase Notice**  
+> This project was developed with AI assistance and vibe-coding.**it has NOT been audited or validated in live production environments.**
 ---
 
-## What is Hearth?
+## What Hearth Does
 
-Hearth is a local-first network monitoring daemon designed to run on a Raspberry Pi (or any Linux/Windows machine). It passively observes all devices on your network, builds behavioral profiles, detects anomalies, and optionally enforces rules — all without sending a single byte to the cloud.
+Hearth is a local-first network monitoring daemon for home networks, homelabs, and small IoT setups. It runs on a local machine (such as a Linux server, Raspberry Pi) to provide visibility into what devices are doing on your local network:
 
-### Key Features
-
-- **Passive Network Monitoring** — Captures all traffic on your LAN via promiscuous mode
-- **Device Profiling** — Builds per-device behavioral baselines over 72+ hours
-- **Anomaly Detection** — Flags excessive uploads, new destinations, and unusual activity hours
-- **Voice Gate** (experimental) — Detects smart speaker audio uploads without wake words
-- **Soft Blocking** — User-defined nftables rules for rate limiting, time-based blocks, and domain allowlists
-- **Dark-Themed Dashboard** — Real-time web UI at `http://localhost:7777`
-- **CLI Control** — Full control from the terminal
-- **Privacy First** — Zero telemetry, zero outbound connections, zero cloud dependencies
+- **Active Subnet Discovery & IoT Fingerprinting** — Pings the local `/24` subnet, reads operating system ARP tables, and performs mDNS (`224.0.0.251:5353`) & SSDP (`239.255.255.250:1900`) discovery to auto-extract friendly device names (Chromecast, Sonos, Apple AirPlay, Hue, smart TVs).
+- **Targeted IoT Port Scanning** — Scans local devices for common unencrypted or management ports (Telnet `23`, RTSP `554`, FTP `21`, MQTT `1883`, HTTP `80`/`8080`).
+- **Statistical Traffic Baselines** — Collects traffic samples to compute per-device hourly baseline averages ($\mu \pm 3\sigma$) and flags unusual volume spikes or activity outside typical hours.
+- **DNS Threat Sinkhole & Encrypted DoH Upstream** — An embedded async DNS proxy that checks requested domain names against downloaded community blocklists (StevenBlack hosts, URLhaus) and answers blocked domains with `0.0.0.0`. Enforces trusted private subnet boundaries and optionally resolves external queries via encrypted DNS-over-HTTPS (RFC 8484 DoH) to prevent ISP eavesdropping.
+- **Threat Intelligence & Autonomous Quarantine** — Ingests public malicious IP feeds (Feodo Tracker, Emerging Threats) and automatically isolates infected devices via parameterized `nftables` hardware drop rules upon confirmed C2 contact (`auto_quarantine = true`).
+- **JA3 Cryptographic TLS Fingerprinting** — Passively parses TLS Client Hello packets to fingerprint client cryptographic configurations without decrypting traffic. Identifies malware and botnet families (Cobalt Strike, Metasploit, Mirai, Trickbot) even when IPs or domains rotate.
+- **Anti-ARP Spoofing, Rogue DHCP & IPv6 RA-Guards** — Full-spectrum LAN defense: detects ARP poisoning, blocks unauthorized DHCP servers from hijacking IPv4 gateways/DNS, and inspects ICMPv6 Router Advertisements (RFC 6105 RA-Guard) to prevent rogue SLAAC gateway takeovers.
+- **Hardened Firewall Quarantine (`nftables`)** — Generates and applies parameterized `nftables` hardware drop rules with strict MAC validation (direct binary execution with zero shell invocation to prevent command injection).
+- **Enterprise SIEM & Webhook Alerts** — Emits structured security events to enterprise SIEMs (Splunk, Graylog, ELK, Datadog) via RFC 5424 Syslog or ArcSight CEF (Common Event Format) over UDP, plus Discord and Slack webhooks.
+- **API Key Authentication** — Protects all administrative mutating API routes with `X-API-Key` or `Bearer` token verification.
+- **Embedded Web Dashboard** — Built-in web UI on port `7777` with Overview, Security, DNS, Threat Intel, Rules, and Digest views.
+- **CLI Utility (`hearth-cli`)** — Command-line tool for headless inspection and administration with `--api-key` and `HEARTH_API_KEY` support.
 
 ---
 
@@ -29,214 +31,230 @@ Hearth is a local-first network monitoring daemon designed to run on a Raspberry
 ```
 hearth/
 ├── crates/
-│   ├── hearth-core/         # Packet capture, device registry, stats engine, storage
-│   ├── hearth-daemon/       # Main binary — orchestrates all components
-│   ├── hearth-dashboard/    # Axum web server + embedded HTML dashboard
-│   ├── hearth-vad/          # Voice Activity Detection — standalone binary
-│   ├── hearth-rules/        # nftables rule engine + enforcement
-│   └── hearth-cli/          # CLI for status, config, manual overrides
+│   ├── hearth-core/         # Packet capture, discovery, port scanner, DNS, threat intel, SQLite store
+│   ├── hearth-daemon/       # Daemon runner — coordinates scanners, monitors, and webhooks
+│   ├── hearth-dashboard/    # Axum HTTP server + embedded web dashboard
+│   ├── hearth-rules/        # nftables rule generation & quarantine enforcement
+│   ├── hearth-cli/          # Command-line interface for status, scanning, and management
+│   └── hearth-vad/          # Voice Activity Detection (experimental audio leak detector)
 ├── config/
-│   └── hearth.toml          # Default configuration
-├── systemd/
-│   └── hearth.service       # systemd unit for Linux deployment
-└── install.sh               # Single-command Linux installer
+│   └── hearth.toml          # Runtime configuration file
+├── Dockerfile               # Multi-stage Linux container build
+├── docker-compose.yml       # Docker compose setup
+└── README.md
 ```
 
-### Crate Dependency Graph
+### Component Flow
 
-```mermaid
-graph TD
-    A[hearth-daemon] --> B[hearth-core]
-    A --> C[hearth-dashboard]
-    C --> B
-    D[hearth-rules] --> B
-    E[hearth-cli] -.->|HTTP API| A
-    F[hearth-vad] -.->|standalone| F
+```
++-------------------------------------------------------------------------------+
+|                               HEARTH DAEMON                                   |
+|                                                                               |
+|  [DnsSinkhole]        [ThreatIntelManager]      [ArpGuard]                    |
+|  (Port 53 DNS proxy)  (Public IP blocklists)    (ARP cache monitor)           |
+|                                                                               |
+|  [NetworkScanner]     [PortScanner]             [PacketCapture]               |
+|  (Active /24 sweep)   (Common IoT ports)        (Promiscuous mode pnet sniffer|
+|         |                   |                          |                      |
+|         +-------------------+--------------------------+                      |
+|                             |                                                 |
+|                             v                                                 |
+|               [Store] (Local SQLite Database)                                 |
+|               - devices, device_ports, traffic_samples                        |
+|               - threat_intel_ips, blocked_domains, dns_queries                |
+|               - anomalies                                                     |
+|                             |                                                 |
+|              +--------------+---------------+                                 |
+|              v                              v                                 |
+|       [StatsEngine]                  [RulesEngine]                            |
+|       - Baseline volume checks       - Schedule enforcement                   |
+|       - CTI destination matches      - Quarantine (nftables drop)             |
+|              |                              |                                 |
+|              v                              v                                 |
+|       [AlertDispatcher]              [Web Dashboard & REST API]               |
+|       - Webhooks (Discord/Slack)     - Port 7777 web interface                |
++-------------------------------------------------------------------------------+
 ```
 
 ---
 
-## Quick Start
+## Setup & Running
 
-### Prerequisites
+### Option 1: Docker (Recommended)
 
-- **Rust** 1.70+ with Cargo
-- **CMake** (for building bundled SQLite)
-- **Linux**: `libpcap-dev` for packet capture
-- **Windows**: [Npcap](https://npcap.com/) for packet capture (falls back to demo mode without it)
-
-### Build
+Requires Docker with Linux host networking support:
 
 ```bash
 git clone https://github.com/Dhruvil-8/Hearth.git
-cd hearth
+cd Hearth
+docker compose up -d
+```
+
+Open **http://localhost:7777** in your browser.
+
+> **Note on DNS Sinkhole:** To use the DNS sinkhole feature, devices on your network must be configured to use the host's IP address as their primary DNS server.
+
+---
+
+### Option 2: Build from Source
+
+#### Prerequisites
+- **Rust 1.75+** (`cargo` and `rustc`)
+- **CMake** (required by `rusqlite` bundled build)
+- **Linux:** `sudo apt install libpcap-dev cmake nftables iputils-ping net-tools`
+- **Windows:** [Npcap SDK](https://npcap.com/) (Npcap OEM/SDK or fallback stub)
+
+#### Build
+```bash
 cargo build --release --workspace
 ```
 
-### Run
-
+#### Run
 ```bash
-# With a config file
 ./target/release/hearth --config config/hearth.toml
-
-# Or with defaults (auto-detects interface, uses ./hearth.db)
-./target/release/hearth
 ```
 
-The dashboard will be available at **http://127.0.0.1:7777**
-
-### Demo Mode
-
-On systems without packet capture capability (no Npcap/libpcap, or no root/admin), Hearth automatically switches to **demo mode** with synthetic network data — useful for exploring the dashboard without a live network.
-
 ---
 
-## Dashboard
-
-The web dashboard provides:
-
-- **Overview** — Device count, total upload today, active anomalies, most active device
-- **Device Table** — Live-updating table with name, vendor, IP, traffic stats, and status indicators
-- **Device Detail** — Click any device for 24h sparkline, profile info, known destinations, anomaly history
-- **Anomaly Banner** — Real-time alerts for detected anomalies with one-click resolve
-- **Weekly Digest** — Plain-English summary of the week's network activity
-
----
-
-## Configuration
-
-Edit `config/hearth.toml`:
+## Configuration (`config/hearth.toml`)
 
 ```toml
-interface = "eth0"              # Network interface (eth0, wlan0, etc.)
-dashboard_port = 7777           # Web dashboard port
-db_path = "./hearth.db"         # SQLite database path
-oui_db_path = "./oui.csv"      # MAC vendor lookup database
-geoip_db_path = "./GeoLite2-Country.mmdb"  # GeoIP database
+# Network interface to monitor (e.g., eth0, wlan0)
+interface = "eth0"
 
-# Give devices friendly names and set rules
-[[devices]]
-mac = "AA:BB:CC:DD:EE:FF"
-label = "Samsung TV"
-max_upload_per_hour_mb = 500.0
-block_hours = ["23:00", "06:00"]   # Block during sleep hours
+# Web dashboard HTTP port
+dashboard_port = 7777
+
+# Local SQLite database path
+db_path = "./hearth.db"
+
+# Optional: Subnet for active discovery (auto-detected if commented out)
+# subnet = "192.168.1.0/24"
+
+# Optional: API key for securing dashboard and API endpoints
+# api_key = "your-secret-token"
+
+# Webhook notification settings (Discord / Slack / Generic HTTP POST)
+[notifications]
+# webhook_url = "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
+notify_on_anomaly = true
+notify_on_new_device = true
+notify_on_vulnerability = true
+notify_on_malicious_traffic = true
+notify_on_arp_spoofing = true
+
+# Cyber Threat Intelligence (CTI) Feed Settings
+[threat_intel]
+enabled = true
+sync_interval_hours = 24
+feeds = [
+    "https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
+    "https://rules.emergingthreats.net/blockrules/compromised-ips.txt",
+]
+
+# DNS Threat Sinkhole Settings (Port 53 UDP)
+[dns]
+enabled = true
+port = 53
+upstream = "1.1.1.1:53"
+blocklists = [
+    "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+    "https://urlhaus.abuse.ch/downloads/hostfile/",
+]
 ```
 
 ---
 
-## API Reference
+## Web Dashboard (`http://localhost:7777`)
 
-All endpoints return JSON. No authentication in this prototype.
+The dashboard provides a visual interface with several tabs:
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/summary` | Dashboard summary stats |
-| `GET` | `/api/devices` | All devices with traffic stats |
-| `GET` | `/api/devices/:mac/history?hours=24` | Traffic history for a device |
-| `GET` | `/api/devices/:mac/profile` | Device behavioral profile |
-| `GET` | `/api/devices/:mac/anomalies` | Anomalies for a device |
-| `GET` | `/api/anomalies` | All unresolved anomalies |
-| `POST` | `/api/anomalies/:id/resolve` | Mark anomaly as resolved |
-| `GET` | `/api/digest` | Weekly digest with highlights |
+1. **Overview** — Live device inventory, 1-hour traffic totals, status indicators (`Normal`, `Profiling`, `Anomaly`, `ISOLATED`), and one-click quarantine buttons.
+2. **Security** — Summary of detected open ports and IoT vulnerability flags.
+3. **DNS Sinkhole** — Query counts, blocked threats, and recent DNS requests.
+4. **Threat Intel** — Tracked malicious IP list and sync status.
+5. **Rules** — Current `nftables` enforcement rules and schedules.
+6. **Weekly Digest** — Summary of network activity and anomalies over the last 7 days.
 
 ---
 
-## CLI Usage
+## CLI Reference (`hearth-cli`)
+
+A command-line tool is included for server or headless administration. When an API key is configured in `hearth.toml`, pass `--api-key <KEY>` or set the `HEARTH_API_KEY` environment variable:
 
 ```bash
-hearth-cli status                     # Dashboard summary + device table
-hearth-cli devices                    # List all devices
-hearth-cli device AA:BB:CC:DD:EE:FF   # Device profile + anomalies
-hearth-cli anomalies                  # List unresolved anomalies
-hearth-cli resolve 42                 # Resolve anomaly #42
-hearth-cli digest                     # Weekly digest
+# General status
+hearth-cli status                     # Show dashboard summary and active device table
+hearth-cli devices                    # List all discovered devices with MAC, IP, and label
+hearth-cli device AA:BB:CC:DD:EE:FF   # Show profile and open ports for a specific device
+
+# Security & Scanning
+hearth-cli scan                       # Trigger an active subnet sweep and IoT port scan
+hearth-cli security                   # Show discovered open ports and at-risk devices
+hearth-cli cti                        # View Cyber Threat Intelligence feeds and tracked IPs
+hearth-cli dns                        # View DNS sinkhole query stats and recent lookups
+
+# Active Defense & Quarantine (requires API key if configured)
+hearth-cli quarantine <MAC>           # Isolate a device at the firewall (nftables drop)
+hearth-cli unquarantine <MAC>         # Remove isolation and restore network access
+hearth-cli rules                      # View active firewall rules
+
+# Anomalies & Maintenance
+hearth-cli anomalies                  # List all unresolved anomalies
+hearth-cli resolve <ID>               # Mark an anomaly as resolved
+hearth-cli digest                     # Print plain-text weekly digest
+
+# Authentication flag example
+hearth-cli --api-key mysecret scan
 ```
 
 ---
 
-## Anomaly Detection
+## REST API Reference
 
-Hearth builds a behavioral profile for each device after **72 hours** of observation. Once a profile is mature, three anomaly detectors run on every traffic sample:
+All endpoints return JSON. When `api_key` is configured in `hearth.toml`, all mutating `POST` endpoints require authentication via `X-API-Key: <key>` or `Authorization: Bearer <key>`. Missing or invalid credentials return `401 Unauthorized`.
 
-| Anomaly | Trigger | Example |
-|---------|---------|---------|
-| **ExcessiveUpload** | bytes_sent > mean + 3 std dev | "Samsung TV uploaded 2.3 GB — 15x above baseline" |
-| **NewDestination** | IP not in known destinations | "Echo Dot connected to new server in Russia" |
-| **UnusualHour** | Traffic outside normal active hours | "Philips Hue active at 3am — outside normal hours" |
+| Method | Endpoint | Auth Required | Description |
+|---|---|---|---|
+| `GET` | `/api/summary` | No | Monitored device count, upload stats, active anomaly count |
+| `GET` | `/api/devices` | No | Discovered devices with traffic stats, port badges, and quarantine state |
+| `POST` | `/api/devices/:mac/quarantine` | **Yes** | Quarantine a device (applies firewall isolation) |
+| `POST` | `/api/devices/:mac/unquarantine` | **Yes** | Remove quarantine isolation |
+| `GET` | `/api/devices/:mac/ports` | No | Open ports detected on a specific device |
+| `GET` | `/api/devices/:mac/profile` | No | 72h baseline statistics for a device |
+| `GET` | `/api/devices/:mac/history` | No | Historical traffic samples (`?hours=24`) |
+| `GET` | `/api/security` | No | Network security overview and open ports |
+| `POST` | `/api/scan` | **Yes** | Trigger immediate subnet discovery and port scan |
+| `GET` | `/api/dns/stats` | No | DNS Sinkhole query counts, blocked queries, and upstream |
+| `GET` | `/api/dns/queries` | No | Recent DNS query logs |
+| `POST` | `/api/dns/sync` | **Yes** | Force synchronization of DNS domain blocklists |
+| `GET` | `/api/threat-intel` | No | Cyber Threat Intelligence stats and tracked IPs |
+| `POST` | `/api/threat-intel/sync` | **Yes** | Force synchronization of threat feeds |
+| `GET` | `/api/rules` | No | Active firewall rules evaluated by the rules engine |
+| `GET` | `/api/anomalies` | No | Unresolved anomalies |
+| `POST` | `/api/anomalies/:id/resolve` | **Yes** | Mark an anomaly as resolved |
+| `GET` | `/api/digest` | No | Plain-English weekly activity summary |
 
 ---
 
-## Project Phases
+## Testing
 
-| Phase | Name | Status | Description |
-|-------|------|--------|-------------|
-| 1 | The Mirror | Complete | Passive observer + dashboard |
-| 2 | The Profiles | Complete | Statistical anomaly detection + digest |
-| 3 | The Voice Gate | Stubbed | VAD model interface built, NFQUEUE Linux-only |
-| 4 | Soft Blocking | Complete | nftables rule engine (Linux-only enforcement) |
-| 5 | CLI | Complete | Full CLI with all commands |
-
----
-
-## Development
-
-### Building on Windows
-
-The project builds on Windows with the `x86_64-pc-windows-gnu` toolchain:
-
-```powershell
-rustup default stable-x86_64-pc-windows-gnu
-cargo build --workspace
-```
-
-Requires [Npcap](https://npcap.com/) and the [Npcap SDK](https://npcap.com/#download) for packet capture linking. Without Npcap installed, the daemon falls back to demo mode at runtime.
-
-### Building on Linux
-
-```bash
-sudo apt install libpcap-dev cmake
-cargo build --release --workspace
-```
-
-### Running Tests
+The project includes unit and integration tests across all workspace crates:
 
 ```bash
 cargo test --workspace
 ```
 
-Tests that link against `pnet` require Npcap (Windows) or libpcap (Linux) at runtime. The store and rules tests use in-memory SQLite and work on all platforms.
-
----
-
-## Security Notes
-
-- Runs as root only for `CAP_NET_RAW` and `CAP_NET_ADMIN` (see systemd unit)
-- Dashboard binds to `127.0.0.1` by default — local access only unless explicitly reconfigured
-- No telemetry or outbound connections initiated by Hearth
-- Config file should be `chmod 600` in production
-
----
-
-## Known Limitations
-
-1. **TLS opacity** — Hearth cannot inspect encrypted traffic content. Voice Gate uses traffic pattern heuristics, not content inspection.
-2. **GeoIP database** — Requires a separately downloaded MaxMind GeoLite2-Country.mmdb file (free account required). Country lookup is disabled if the file is missing.
-3. **OUI database** — MAC vendor lookup requires an offline CSV. Vendor info shows as "Unknown" if the file is missing.
-4. **Windows** — nftables rules and NFQUEUE are Linux-only. These features are logged but not enforced on Windows.
+The test suite covers:
+- SQLite store migrations, device CRUD, port tracking, and quarantine states
+- Baseline statistics calculation ($\mu \pm 3\sigma$) and anomaly deduplication
+- Threat intelligence feed parsing and IP lookup
+- DNS wire-format question extraction, A-record parsing, and 0.0.0.0 sinkhole packet generation
+- Anti-ARP spoofing gateway detection logic
+- Firewall quarantine rule generation
 
 ---
 
 ## License
 
 MIT License — see [LICENSE](LICENSE)
-
----
-
-## Acknowledgments
-
-- Written by [Claude Opus 4.6](https://www.anthropic.com/) (Anthropic) in [Antigravity IDE](https://blog.google/technology/google-deepmind/) by Google
-- Built with [Rust](https://www.rust-lang.org/), [Axum](https://github.com/tokio-rs/axum), [pnet](https://github.com/libpnet/libpnet), and [rusqlite](https://github.com/rusqlite/rusqlite)
-
----
-
-*Hearth — Because your home network should not phone home.*

@@ -26,6 +26,7 @@ pub enum ActionKind {
     BlockOutbound { destination: Option<IpAddr> },
     RateLimit { max_bytes_per_second: u64 },
     AllowOnly { domains: Vec<String> },
+    Quarantine,
 }
 
 impl RulesEngine {
@@ -89,82 +90,195 @@ impl RulesEngine {
             }
         }
 
+        // Apply strict quarantine isolation rules
+        if let Ok(quarantined) = self.store.get_quarantined_devices() {
+            for q_dev in quarantined {
+                actions.push(RuleAction {
+                    mac: q_dev.mac.clone(),
+                    action: ActionKind::Quarantine,
+                    reason: "Emergency device quarantine isolation active".to_string(),
+                    expires_at: None,
+                });
+            }
+        }
+
         Ok(actions)
     }
 
-    /// Apply rule actions by generating nftables commands.
-    /// On Linux: shells out to `nft`. On other platforms: logs only.
+    /// Apply rule actions by generating and executing nftables commands.
+    /// Executes `nft` directly with parameterized arguments (no shell interpreter invocation to prevent injection).
     pub fn apply(&self, actions: &[RuleAction]) -> anyhow::Result<()> {
         if actions.is_empty() {
             return Ok(());
         }
 
-        let mut commands = Vec::new();
+        let mut nft_arg_lists: Vec<Vec<String>> = Vec::new();
 
         // Always flush and reapply from scratch
-        commands.push("nft flush chain inet hearth forward".to_string());
+        nft_arg_lists.push(vec![
+            "flush".into(),
+            "chain".into(),
+            "inet".into(),
+            "hearth".into(),
+            "forward".into(),
+        ]);
 
         for action in actions {
-            let cmd = match &action.action {
-                ActionKind::BlockOutbound { destination: None } => {
-                    format!(
-                        "nft add rule inet hearth forward ether saddr {} drop",
-                        action.mac
-                    )
+            // Strict MAC address format validation to prevent injection
+            if !is_valid_mac(&action.mac) {
+                tracing::error!("Invalid MAC address format in rule action: '{}'", action.mac);
+                continue;
+            }
+
+            match &action.action {
+                ActionKind::BlockOutbound { destination: None } | ActionKind::Quarantine => {
+                    nft_arg_lists.push(vec![
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        "hearth".into(),
+                        "forward".into(),
+                        "ether".into(),
+                        "saddr".into(),
+                        action.mac.clone(),
+                        "drop".into(),
+                    ]);
                 }
                 ActionKind::BlockOutbound {
                     destination: Some(ip),
                 } => {
-                    format!(
-                        "nft add rule inet hearth forward ether saddr {} ip daddr {} drop",
-                        action.mac, ip
-                    )
+                    nft_arg_lists.push(vec![
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        "hearth".into(),
+                        "forward".into(),
+                        "ether".into(),
+                        "saddr".into(),
+                        action.mac.clone(),
+                        "ip".into(),
+                        "daddr".into(),
+                        ip.to_string(),
+                        "drop".into(),
+                    ]);
                 }
                 ActionKind::RateLimit {
                     max_bytes_per_second,
                 } => {
-                    let kbps = max_bytes_per_second / 1024;
-                    format!(
-                        "nft add rule inet hearth forward ether saddr {} limit rate {} kbytes/second accept",
-                        action.mac, kbps.max(1)
-                    )
+                    let kbps = (max_bytes_per_second / 1024).max(1);
+                    nft_arg_lists.push(vec![
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        "hearth".into(),
+                        "forward".into(),
+                        "ether".into(),
+                        "saddr".into(),
+                        action.mac.clone(),
+                        "limit".into(),
+                        "rate".into(),
+                        format!("{}/kbytes/second", kbps),
+                        "accept".into(),
+                    ]);
                 }
-                ActionKind::AllowOnly { domains: _ } => {
-                    // Domain-based filtering would need DNS-based resolution
-                    // For now, log the intent
-                    format!(
-                        "# Allow-only rule for {} — requires DNS resolution",
-                        action.mac
-                    )
+                ActionKind::AllowOnly { domains } => {
+                    use std::net::ToSocketAddrs;
+                    tracing::info!(
+                        "Enforcing AllowOnly domain rules for {} ({} domains)",
+                        action.mac,
+                        domains.len()
+                    );
+                    // Allow DNS resolution (UDP & TCP 53) so device can query allowed domains
+                    nft_arg_lists.push(vec![
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        "hearth".into(),
+                        "forward".into(),
+                        "ether".into(),
+                        "saddr".into(),
+                        action.mac.clone(),
+                        "udp".into(),
+                        "dport".into(),
+                        "53".into(),
+                        "accept".into(),
+                    ]);
+                    nft_arg_lists.push(vec![
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        "hearth".into(),
+                        "forward".into(),
+                        "ether".into(),
+                        "saddr".into(),
+                        action.mac.clone(),
+                        "tcp".into(),
+                        "dport".into(),
+                        "53".into(),
+                        "accept".into(),
+                    ]);
+
+                    // Resolve domains to IPs and permit them
+                    for domain in domains {
+                        if let Ok(addrs) = format!("{}:80", domain).to_socket_addrs() {
+                            for socket_addr in addrs {
+                                let ip = socket_addr.ip();
+                                nft_arg_lists.push(vec![
+                                    "add".into(),
+                                    "rule".into(),
+                                    "inet".into(),
+                                    "hearth".into(),
+                                    "forward".into(),
+                                    "ether".into(),
+                                    "saddr".into(),
+                                    action.mac.clone(),
+                                    "ip".into(),
+                                    "daddr".into(),
+                                    ip.to_string(),
+                                    "accept".into(),
+                                ]);
+                            }
+                        }
+                    }
+
+                    // Default drop all other forward traffic from this restricted MAC
+                    nft_arg_lists.push(vec![
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        "hearth".into(),
+                        "forward".into(),
+                        "ether".into(),
+                        "saddr".into(),
+                        action.mac.clone(),
+                        "drop".into(),
+                    ]);
                 }
-            };
-            commands.push(cmd);
+            }
         }
 
-        // Execute commands
+        // Execute commands directly without shell
         #[cfg(target_os = "linux")]
         {
-            for cmd in &commands {
-                if cmd.starts_with('#') {
-                    continue;
-                }
-                tracing::info!("nftables: {}", cmd);
-                let output = std::process::Command::new("sh").arg("-c").arg(cmd).output();
+            for args in &nft_arg_lists {
+                tracing::info!("Executing nft: {:?}", args);
+                let output = std::process::Command::new("nft").args(args).output();
                 match output {
                     Ok(o) if o.status.success() => {}
                     Ok(o) => tracing::error!(
-                        "nft command failed: {}",
+                        "nft command {:?} failed: {}",
+                        args,
                         String::from_utf8_lossy(&o.stderr)
                     ),
-                    Err(e) => tracing::error!("Failed to execute nft: {}", e),
+                    Err(e) => tracing::error!("Failed to execute nft {:?}: {}", args, e),
                 }
             }
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            for cmd in &commands {
-                tracing::info!("[DRY RUN] nftables: {}", cmd);
+            for args in &nft_arg_lists {
+                tracing::info!("[DRY RUN] nft {:?}", args);
             }
         }
 
@@ -196,11 +310,41 @@ impl RulesEngine {
                     format!("nft add rule inet hearth forward ether saddr {} limit rate {} kbytes/second accept",
                         action.mac, max_bytes_per_second / 1024)
                 }
-                ActionKind::AllowOnly { .. } => format!("# allow-only for {}", action.mac),
+                ActionKind::Quarantine => {
+                    format!(
+                        "nft add rule inet hearth forward ether saddr {} drop",
+                        action.mac
+                    )
+                }
+                ActionKind::AllowOnly { domains } => {
+                    format!(
+                        "nft add rule inet hearth forward ether saddr {} drop # allow-only: {}",
+                        action.mac,
+                        domains.join(", ")
+                    )
+                }
             };
             commands.push(cmd);
         }
         commands
+    }
+
+    /// Immediately quarantine a device by MAC address and reapply firewall rules.
+    pub async fn quarantine_device(&self, mac: &str) -> anyhow::Result<()> {
+        self.store.set_device_quarantine(mac, true)?;
+        let actions = self.evaluate().await?;
+        self.apply(&actions)?;
+        tracing::warn!("🛡️ Device {} has been QUARANTINED at the firewall", mac);
+        Ok(())
+    }
+
+    /// Remove quarantine isolation for a device and restore normal access.
+    pub async fn unquarantine_device(&self, mac: &str) -> anyhow::Result<()> {
+        self.store.set_device_quarantine(mac, false)?;
+        let actions = self.evaluate().await?;
+        self.apply(&actions)?;
+        tracing::info!("Device {} has been unquarantined", mac);
+        Ok(())
     }
 }
 
@@ -225,20 +369,39 @@ fn is_within_block_hours(start: &str, end: &str, now: &DateTime<Utc>) -> bool {
     }
 }
 
+/// Validate MAC address format (e.g. 00:11:22:33:44:55 or 00-11-22-33-44-55) to prevent command injection.
+pub fn is_valid_mac(mac: &str) -> bool {
+    let parts: Vec<&str> = if mac.contains(':') {
+        mac.split(':').collect()
+    } else if mac.contains('-') {
+        mac.split('-').collect()
+    } else {
+        return false;
+    };
+
+    if parts.len() != 6 {
+        return false;
+    }
+
+    parts.iter().all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// Initialize the hearth nftables table (Linux only).
 pub fn init_nftables() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let cmds = [
-            "nft add table inet hearth",
-            "nft add chain inet hearth forward { type filter hook forward priority 0 \\; }",
+        let commands: [&[&str]; 2] = [
+            &["add", "table", "inet", "hearth"],
+            &["add", "chain", "inet", "hearth", "forward", "{ type filter hook forward priority 0 ; }"],
         ];
-        for cmd in &cmds {
-            tracing::info!("nftables init: {}", cmd);
-            std::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .output()?;
+        for args in &commands {
+            tracing::info!("nftables init: nft {:?}", args);
+            let status = std::process::Command::new("nft")
+                .args(*args)
+                .status()?;
+            if !status.success() {
+                tracing::warn!("nft init command failed with status: {}", status);
+            }
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -278,9 +441,14 @@ mod tests {
         let config = Config {
             interface: "eth0".into(),
             dashboard_port: 7777,
+            subnet: None,
+            api_key: None,
             db_path: ":memory:".into(),
             oui_db_path: "".into(),
             geoip_db_path: "".into(),
+            notifications: Default::default(),
+            threat_intel: Default::default(),
+            dns: Default::default(),
             devices: vec![],
         };
         let store = Arc::new(Store::new(":memory:").unwrap());
@@ -298,5 +466,49 @@ mod tests {
         assert!(cmds[0].contains("flush"));
         assert!(cmds[1].contains("AA:BB:CC:DD:EE:FF"));
         assert!(cmds[1].contains("drop"));
+    }
+
+    #[test]
+    fn test_generate_quarantine_command() {
+        let config = Config {
+            interface: "eth0".into(),
+            dashboard_port: 7777,
+            subnet: None,
+            api_key: None,
+            db_path: ":memory:".into(),
+            oui_db_path: "".into(),
+            geoip_db_path: "".into(),
+            notifications: Default::default(),
+            threat_intel: Default::default(),
+            dns: Default::default(),
+            devices: vec![],
+        };
+        let store = Arc::new(Store::new(":memory:").unwrap());
+        let engine = RulesEngine::new(config, store);
+
+        let actions = vec![RuleAction {
+            mac: "11:22:33:44:55:66".into(),
+            action: ActionKind::Quarantine,
+            reason: "Emergency isolation".into(),
+            expires_at: None,
+        }];
+
+        let cmds = engine.generate_commands(&actions);
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds[1].contains("11:22:33:44:55:66"));
+        assert!(cmds[1].contains("drop"));
+    }
+
+    #[test]
+    fn test_is_valid_mac() {
+        assert!(is_valid_mac("00:11:22:33:44:55"));
+        assert!(is_valid_mac("AA:BB:CC:DD:EE:FF"));
+        assert!(is_valid_mac("aa-bb-cc-dd-ee-ff"));
+        // Invalid formats / potential injection
+        assert!(!is_valid_mac("00:11:22:33:44"));
+        assert!(!is_valid_mac("00:11:22:33:44:55:66"));
+        assert!(!is_valid_mac("00:11:22:33:44:GG"));
+        assert!(!is_valid_mac("00:11:22:33:44:55; rm -rf /"));
+        assert!(!is_valid_mac("eth0"));
     }
 }

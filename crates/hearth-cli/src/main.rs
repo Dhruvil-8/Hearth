@@ -12,6 +12,10 @@ struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:7777")]
     api: String,
 
+    /// Optional API key for authenticating API requests (can also use HEARTH_API_KEY environment variable)
+    #[arg(long)]
+    api_key: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -30,6 +34,12 @@ enum Commands {
     Resolve { id: i64 },
     /// Print the weekly digest as plain text
     Digest,
+    /// Trigger an active network discovery & security port scan
+    Scan,
+    /// Inspect active firewall / nftables enforcement rules
+    Rules,
+    /// Show security overview and open ports
+    Security,
     /// Assign a friendly name to a device
     Label { mac: String, name: String },
     /// Block a device's outbound traffic
@@ -41,6 +51,14 @@ enum Commands {
     },
     /// Remove a manual block on a device
     Unblock { mac: String },
+    /// Immediately isolate/quarantine a device from the network
+    Quarantine { mac: String },
+    /// Remove quarantine isolation from a device
+    Unquarantine { mac: String },
+    /// View DNS Threat Sinkhole statistics and recent queries
+    Dns,
+    /// View Cyber Threat Intelligence feeds and tracked malicious IPs
+    Cti,
     /// Voice gate subcommands
     Vad {
         #[command(subcommand)]
@@ -60,10 +78,12 @@ enum VadCommands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let base = cli.api.trim_end_matches('/');
+    let env_key = std::env::var("HEARTH_API_KEY").ok();
+    let key = cli.api_key.as_deref().or(env_key.as_deref());
 
     match cli.command {
         Commands::Status => {
-            let summary = http_get(&format!("{}/api/summary", base)).await?;
+            let summary = http_get(&format!("{}/api/summary", base), key).await?;
             let s: serde_json::Value = serde_json::from_str(&summary)?;
             println!("HEARTH STATUS");
             println!("--------------------------------------");
@@ -79,12 +99,12 @@ async fn main() -> Result<()> {
             );
             println!("--------------------------------------");
 
-            let devices = http_get(&format!("{}/api/devices", base)).await?;
+            let devices = http_get(&format!("{}/api/devices", base), key).await?;
             let devs: Vec<serde_json::Value> = serde_json::from_str(&devices)?;
             if !devs.is_empty() {
                 println!(
-                    "\n{:<20} {:<16} {:>12} {:>12} {}",
-                    "Name/MAC", "IP", "Sent/1h", "Recv/1h", "Status"
+                    "\n{:<20} {:<16} {:>12} {:>12} Status",
+                    "Name/MAC", "IP", "Sent/1h", "Recv/1h"
                 );
                 println!("{}", "-".repeat(75));
                 for d in &devs {
@@ -110,9 +130,9 @@ async fn main() -> Result<()> {
         }
 
         Commands::Devices => {
-            let body = http_get(&format!("{}/api/devices", base)).await?;
+            let body = http_get(&format!("{}/api/devices", base), key).await?;
             let devs: Vec<serde_json::Value> = serde_json::from_str(&body)?;
-            println!("{:<20} {:<18} {:<16} {}", "Label", "MAC", "IP", "Last Seen");
+            println!("{:<20} {:<18} {:<16} Last Seen", "Label", "MAC", "IP");
             println!("{}", "-".repeat(70));
             for d in &devs {
                 println!(
@@ -128,7 +148,7 @@ async fn main() -> Result<()> {
         Commands::Device { mac } => {
             let enc = mac.replace(":", "%3A");
             // Profile
-            match http_get(&format!("{}/api/devices/{}/profile", base, enc)).await {
+            match http_get(&format!("{}/api/devices/{}/profile", base, enc), key).await {
                 Ok(body) => {
                     let p: serde_json::Value = serde_json::from_str(&body)?;
                     println!("Device: {}", mac);
@@ -146,28 +166,25 @@ async fn main() -> Result<()> {
                 Err(_) => println!("No profile yet for {}", mac),
             }
             // Anomalies
-            match http_get(&format!("{}/api/devices/{}/anomalies", base, enc)).await {
-                Ok(body) => {
-                    let anomalies: Vec<serde_json::Value> = serde_json::from_str(&body)?;
-                    println!("\nRecent anomalies:");
-                    for a in anomalies.iter().take(5) {
-                        println!(
-                            "  [{:>18}] {} - {}",
-                            a["kind"].as_str().unwrap_or("?"),
-                            a["detected_at"].as_str().unwrap_or("?"),
-                            a["detail"].as_str().unwrap_or("?")
-                        );
-                    }
-                    if anomalies.is_empty() {
-                        println!("  None");
-                    }
+            if let Ok(body) = http_get(&format!("{}/api/devices/{}/anomalies", base, enc), key).await {
+                let anomalies: Vec<serde_json::Value> = serde_json::from_str(&body)?;
+                println!("\nRecent anomalies:");
+                for a in anomalies.iter().take(5) {
+                    println!(
+                        "  [{:>18}] {} - {}",
+                        a["kind"].as_str().unwrap_or("?"),
+                        a["detected_at"].as_str().unwrap_or("?"),
+                        a["detail"].as_str().unwrap_or("?")
+                    );
                 }
-                Err(_) => {}
+                if anomalies.is_empty() {
+                    println!("  None");
+                }
             }
         }
 
         Commands::Anomalies => {
-            let body = http_get(&format!("{}/api/anomalies", base)).await?;
+            let body = http_get(&format!("{}/api/anomalies", base), key).await?;
             let anomalies: Vec<serde_json::Value> = serde_json::from_str(&body)?;
             if anomalies.is_empty() {
                 println!("No active anomalies.");
@@ -185,12 +202,12 @@ async fn main() -> Result<()> {
         }
 
         Commands::Resolve { id } => {
-            http_post(&format!("{}/api/anomalies/{}/resolve", base, id)).await?;
+            http_post(&format!("{}/api/anomalies/{}/resolve", base, id), key).await?;
             println!("Anomaly #{} resolved.", id);
         }
 
         Commands::Digest => {
-            let body = http_get(&format!("{}/api/digest", base)).await?;
+            let body = http_get(&format!("{}/api/digest", base), key).await?;
             let d: serde_json::Value = serde_json::from_str(&body)?;
             println!("=== Weekly Digest ===");
             println!(
@@ -211,6 +228,81 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Scan => {
+            println!("Triggering active network discovery and port security sweep...");
+            let res = http_post(&format!("{}/api/scan", base), key).await?;
+            let val: serde_json::Value = serde_json::from_str(&res)?;
+            println!("Scan completed successfully!");
+            println!("Discovered devices: {}", val["discovered_devices"]);
+            println!("Scanned open ports: {}", val["scanned_ports"]);
+        }
+
+        Commands::Rules => {
+            let body = http_get(&format!("{}/api/rules", base), key).await?;
+            let actions: Vec<serde_json::Value> = serde_json::from_str(&body)?;
+            println!("=== Active Firewall Rules ===");
+            if actions.is_empty() {
+                println!("No active blocking or rate-limiting rules.");
+            } else {
+                for act in &actions {
+                    println!(
+                        "[{}] {} — Reason: {}",
+                        act["mac"].as_str().unwrap_or("?"),
+                        act["action"],
+                        act["reason"].as_str().unwrap_or("?")
+                    );
+                }
+            }
+        }
+
+        Commands::Security => {
+            let body = http_get(&format!("{}/api/security", base), key).await?;
+            let s: serde_json::Value = serde_json::from_str(&body)?;
+            println!("=== Hearth Security Overview ===");
+            println!("Total monitored devices:        {}", s["total_devices"]);
+            println!("Devices with insecure ports:    {}", s["devices_with_insecure_ports"]);
+            println!("Active unresolved anomalies:    {}", s["active_anomalies"]);
+
+            if let Some(ports) = s["insecure_ports"].as_array() {
+                if !ports.is_empty() {
+                    println!("\n[!] Insecure Open Ports Discovered:");
+                    for p in ports {
+                        println!(
+                            "  - MAC: {:<18} Port: {:<5} Service: {:<10} Discovered: {}",
+                            p["mac"].as_str().unwrap_or("?"),
+                            p["port"],
+                            p["service"].as_str().unwrap_or("?"),
+                            p["discovered_at"].as_str().unwrap_or("?")
+                        );
+                    }
+                } else {
+                    println!("\n[ok] No high-risk insecure ports detected on the network.");
+                }
+            }
+
+            if let Ok(anom_res) = http_get(&format!("{}/api/anomalies", base), key).await {
+                if let Ok(anomalies) = serde_json::from_str::<Vec<serde_json::Value>>(&anom_res) {
+                    if !anomalies.is_empty() {
+                        println!("\n🚨 Active Threat Anomalies & Zero-Day Detections:");
+                        for a in anomalies {
+                            let kind_str = a["kind"].as_str().unwrap_or("?");
+                            let is_zero_day = kind_str == "CanaryTripDetected"
+                                || kind_str == "DgaDomainDetected"
+                                || kind_str == "DnsTunnelingExfiltration";
+                            let tag = if is_zero_day { "⚡ [ZERO-DAY]" } else { "🚨 [ANOMALY]" };
+                            println!(
+                                "  {} {:<24} MAC: {:<18} {}",
+                                tag,
+                                kind_str,
+                                a["mac"].as_str().unwrap_or("?"),
+                                a["detail"].as_str().unwrap_or("?")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         Commands::Label { mac, name } => {
             println!(
                 "Label '{}' assigned to {}. (Note: requires config file update)",
@@ -218,18 +310,103 @@ async fn main() -> Result<()> {
             );
         }
 
-        Commands::Block { mac, hours } => {
-            println!(
-                "Blocking {} {}",
-                mac,
-                hours
-                    .map(|h| format!("for {} hours", h))
-                    .unwrap_or_else(|| "permanently".into())
-            );
+        Commands::Block { mac, hours: _ } => {
+            println!("Applying firewall block for {}...", mac);
+            let res = http_post(&format!("{}/api/devices/{}/quarantine", base, mac), key).await?;
+            let val: serde_json::Value = serde_json::from_str(&res)?;
+            println!("🛡️  {}", val["message"].as_str().unwrap_or("Device blocked at firewall"));
         }
 
         Commands::Unblock { mac } => {
-            println!("Unblocking {}", mac);
+            println!("Removing firewall block for {}...", mac);
+            let res = http_post(&format!("{}/api/devices/{}/unquarantine", base, mac), key).await?;
+            let val: serde_json::Value = serde_json::from_str(&res)?;
+            println!("✅ {}", val["message"].as_str().unwrap_or("Device unblocked"));
+        }
+
+        Commands::Quarantine { mac } => {
+            let res = http_post(&format!("{}/api/devices/{}/quarantine", base, mac), key).await?;
+            let val: serde_json::Value = serde_json::from_str(&res)?;
+            println!("🛡️  {}", val["message"].as_str().unwrap_or("Device quarantined"));
+        }
+
+        Commands::Unquarantine { mac } => {
+            let res = http_post(&format!("{}/api/devices/{}/unquarantine", base, mac), key).await?;
+            let val: serde_json::Value = serde_json::from_str(&res)?;
+            println!("✅ {}", val["message"].as_str().unwrap_or("Quarantine removed"));
+        }
+
+        Commands::Dns => {
+            let stats_raw = http_get(&format!("{}/api/dns/stats", base), key).await?;
+            let s: serde_json::Value = serde_json::from_str(&stats_raw)?;
+            println!("HEARTH DNS THREAT SINKHOLE");
+            println!("------------------------------------------------");
+            println!(
+                "  Status:          {:>28}",
+                if s["enabled"].as_bool().unwrap_or(false) {
+                    "ACTIVE (Port 53)"
+                } else {
+                    "DISABLED"
+                }
+            );
+            println!("  Upstream DNS:    {:>28}", s["upstream"].as_str().unwrap_or("-"));
+            println!("  Total Queries:   {:>28}", s["stats"]["total_queries"]);
+            println!("  Blocked Threats: {:>28}", s["stats"]["blocked_queries"]);
+            println!("  Blocked Domains: {:>28}", s["stats"]["total_blocked_domains"]);
+            println!("------------------------------------------------");
+
+            let queries_raw = http_get(&format!("{}/api/dns/queries", base), key).await?;
+            let queries: Vec<serde_json::Value> = serde_json::from_str(&queries_raw)?;
+            if !queries.is_empty() {
+                println!("\nRECENT DNS QUERIES");
+                println!("{:<24} {:<16} {:<32} Action", "Timestamp", "Client IP", "Domain");
+                println!("{}", "-".repeat(82));
+                for q in queries.iter().take(20) {
+                    let ts = q["timestamp"].as_str().unwrap_or("-");
+                    let client = q["client_ip"].as_str().unwrap_or("-");
+                    let domain = q["domain"].as_str().unwrap_or("-");
+                    let is_blocked = q["is_blocked"].as_bool().unwrap_or(false);
+                    let action = if is_blocked { "🛑 BLOCKED (Sinkholed)" } else { "✅ Resolved" };
+                    println!("{:<24} {:<16} {:<32} {}", &ts[..19.min(ts.len())], client, domain, action);
+                }
+            }
+        }
+
+        Commands::Cti => {
+            let intel_raw = http_get(&format!("{}/api/threat-intel", base), key).await?;
+            let intel: serde_json::Value = serde_json::from_str(&intel_raw)?;
+            println!("CYBER THREAT INTELLIGENCE (CTI)");
+            println!("------------------------------------------------");
+            println!(
+                "  Status:             {:>24}",
+                if intel["enabled"].as_bool().unwrap_or(false) {
+                    "ACTIVE"
+                } else {
+                    "DISABLED"
+                }
+            );
+            println!("  Tracked Malicious IPs: {:>21}", intel["total_tracked_malicious_ips"]);
+            println!("------------------------------------------------");
+            if let Some(feeds) = intel["feeds"].as_array() {
+                println!("  Feeds:");
+                for f in feeds {
+                    println!("    - {}", f.as_str().unwrap_or(""));
+                }
+            }
+            if let Some(recent) = intel["recent_threats"].as_array() {
+                if !recent.is_empty() {
+                    println!("\nTRACKED THREAT NODES");
+                    println!("{:<18} {:<24} {:<15} Confidence", "IP Address", "Feed", "Threat Type");
+                    println!("{}", "-".repeat(70));
+                    for t in recent.iter().take(15) {
+                        let ip = t["ip"].as_str().unwrap_or("-");
+                        let feed = t["feed"].as_str().unwrap_or("-");
+                        let tt = t["threat_type"].as_str().unwrap_or("-");
+                        let conf = t["confidence"].as_u64().unwrap_or(0);
+                        println!("{:<18} {:<24} {:<15} {}%", ip, feed, tt, conf);
+                    }
+                }
+            }
         }
 
         Commands::Vad { command } => match command {
@@ -245,17 +422,35 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Validate and prevent CRLF injection in HTTP headers/paths.
+fn sanitize_http_param(val: &str, field: &str) -> Result<()> {
+    if val.contains('\r') || val.contains('\n') {
+        anyhow::bail!("Security error: CRLF injection detected in {}", field);
+    }
+    Ok(())
+}
+
 /// Simple HTTP GET using tokio's TCP.
-async fn http_get(url: &str) -> Result<String> {
+async fn http_get(url: &str, api_key: Option<&str>) -> Result<String> {
     // Parse URL manually for a minimal HTTP client (no external deps)
     let url = url.strip_prefix("http://").unwrap_or(url);
     let (host_port, path) = url.split_once('/').unwrap_or((url, ""));
     let path = format!("/{}", path);
+    sanitize_http_param(&path, "URL path")?;
+    sanitize_http_param(host_port, "Host")?;
+
+    let auth_header = match api_key {
+        Some(k) if !k.is_empty() => {
+            sanitize_http_param(k, "API key")?;
+            format!("X-API-Key: {}\r\nAuthorization: Bearer {}\r\n", k, k)
+        }
+        _ => String::new(),
+    };
 
     let stream = tokio::net::TcpStream::connect(host_port).await?;
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        path, host_port
+        "GET {} HTTP/1.1\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
+        path, host_port, auth_header
     );
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -276,15 +471,25 @@ async fn http_get(url: &str) -> Result<String> {
 }
 
 /// Simple HTTP POST.
-async fn http_post(url: &str) -> Result<String> {
+async fn http_post(url: &str, api_key: Option<&str>) -> Result<String> {
     let url = url.strip_prefix("http://").unwrap_or(url);
     let (host_port, path) = url.split_once('/').unwrap_or((url, ""));
     let path = format!("/{}", path);
+    sanitize_http_param(&path, "URL path")?;
+    sanitize_http_param(host_port, "Host")?;
+
+    let auth_header = match api_key {
+        Some(k) if !k.is_empty() => {
+            sanitize_http_param(k, "API key")?;
+            format!("X-API-Key: {}\r\nAuthorization: Bearer {}\r\n", k, k)
+        }
+        _ => String::new(),
+    };
 
     let stream = tokio::net::TcpStream::connect(host_port).await?;
     let request = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        path, host_port
+        "POST {} HTTP/1.1\r\nHost: {}\r\n{}Content-Length: 0\r\nConnection: close\r\n\r\n",
+        path, host_port, auth_header
     );
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

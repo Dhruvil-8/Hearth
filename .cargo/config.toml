@@ -1,2 +1,3 @@
 [target.x86_64-pc-windows-gnu]
 linker = "gcc"
+rustflags = ["-L", "native=./lib/x64"]

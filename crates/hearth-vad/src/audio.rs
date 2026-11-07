@@ -1,8 +1,10 @@
-/// Audio extraction utilities for the Voice Gate.
-///
-/// In a real TLS-intercepting scenario, we'd extract PCM from decrypted payloads.
-/// Since we can't decrypt TLS, this module provides utilities for working with
-/// raw audio data from alternative sources (e.g., local microphone).
+#![allow(dead_code)]
+
+//! Audio extraction utilities for the Voice Gate.
+//!
+//! In a real TLS-intercepting scenario, we'd extract PCM from decrypted payloads.
+//! Since we can't decrypt TLS, this module provides utilities for working with
+//! raw audio data from alternative sources (e.g., local microphone).
 
 /// Convert raw bytes to f32 PCM samples (16-bit LE assumed).
 pub fn bytes_to_pcm_f32(raw: &[u8]) -> Vec<f32> {

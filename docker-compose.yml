@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  hearth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hearth
+    restart: unless-stopped
+    # host network mode is required for promiscuous packet capture and ARP inspection
+    network_mode: "host"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./config:/etc/hearth:ro
+      - hearth-data:/var/lib/hearth
+    environment:
+      - RUST_LOG=info
+
+volumes:
+  hearth-data:

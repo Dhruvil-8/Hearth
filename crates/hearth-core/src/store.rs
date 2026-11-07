@@ -1,4 +1,7 @@
-use crate::types::{Anomaly, AnomalyKind, Device, DeviceProfile, TrafficSample};
+use crate::types::{
+    Anomaly, AnomalyKind, Device, DevicePort, DeviceProfile, DnsQueryLog, DnsStats,
+    ThreatIntelEntry, TrafficSample,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
@@ -54,7 +57,8 @@ impl Store {
                 vendor TEXT,
                 label TEXT,
                 first_seen TEXT NOT NULL,
-                last_seen TEXT NOT NULL
+                last_seen TEXT NOT NULL,
+                is_quarantined INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS traffic_samples (
@@ -86,11 +90,58 @@ impl Store {
                 resolved INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS device_ports (
+                mac TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                service TEXT NOT NULL,
+                is_insecure INTEGER NOT NULL DEFAULT 0,
+                discovered_at TEXT NOT NULL,
+                PRIMARY KEY (mac, port)
+            );
+
+            CREATE TABLE IF NOT EXISTS threat_intel_ips (
+                ip TEXT PRIMARY KEY,
+                feed TEXT NOT NULL,
+                threat_type TEXT NOT NULL,
+                confidence INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                last_updated TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS blocked_domains (
+                domain TEXT PRIMARY KEY,
+                list_source TEXT NOT NULL,
+                added_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS dns_queries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                client_ip TEXT NOT NULL,
+                client_mac TEXT,
+                domain TEXT NOT NULL,
+                query_type TEXT NOT NULL,
+                is_blocked INTEGER NOT NULL DEFAULT 0,
+                block_reason TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_samples_mac_time ON traffic_samples(mac, timestamp);
             CREATE INDEX IF NOT EXISTS idx_anomalies_mac ON anomalies(mac);
+            CREATE INDEX IF NOT EXISTS idx_ports_mac ON device_ports(mac);
+            CREATE INDEX IF NOT EXISTS idx_threat_ips ON threat_intel_ips(ip);
+            CREATE INDEX IF NOT EXISTS idx_blocked_domains ON blocked_domains(domain);
+            CREATE INDEX IF NOT EXISTS idx_dns_queries_time ON dns_queries(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_dns_queries_domain ON dns_queries(domain);
             ",
         )
         .context("Failed to run database migrations")?;
+
+        // Safely add is_quarantined if older database exists without it
+        let _ = conn.execute(
+            "ALTER TABLE devices ADD COLUMN is_quarantined INTEGER NOT NULL DEFAULT 0;",
+            [],
+        );
+
         Ok(())
     }
 
@@ -98,14 +149,15 @@ impl Store {
     pub fn upsert_device(&self, device: &Device) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO devices (mac, ip, vendor, label, first_seen, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO devices (mac, ip, vendor, label, first_seen, last_seen, is_quarantined)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(mac) DO UPDATE SET
                 ip = excluded.ip,
                 vendor = COALESCE(excluded.vendor, devices.vendor),
                 label = COALESCE(excluded.label, devices.label),
                 first_seen = devices.first_seen,
-                last_seen = excluded.last_seen",
+                last_seen = excluded.last_seen,
+                is_quarantined = COALESCE(devices.is_quarantined, excluded.is_quarantined)",
             params![
                 device.mac,
                 device.ip.to_string(),
@@ -113,6 +165,7 @@ impl Store {
                 device.label,
                 device.first_seen.to_rfc3339(),
                 device.last_seen.to_rfc3339(),
+                device.is_quarantined as i32,
             ],
         )?;
         Ok(())
@@ -140,12 +193,13 @@ impl Store {
     pub fn get_all_devices(&self) -> Result<Vec<Device>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
-            conn.prepare("SELECT mac, ip, vendor, label, first_seen, last_seen FROM devices ORDER BY last_seen DESC")?;
+            conn.prepare("SELECT mac, ip, vendor, label, first_seen, last_seen, is_quarantined FROM devices ORDER BY last_seen DESC")?;
         let devices = stmt
             .query_map([], |row| {
                 let ip_str: String = row.get(1)?;
                 let first_seen_str: String = row.get(4)?;
                 let last_seen_str: String = row.get(5)?;
+                let is_quarantined: i32 = row.get(6).unwrap_or(0);
                 Ok(Device {
                     mac: row.get(0)?,
                     ip: ip_str
@@ -159,6 +213,7 @@ impl Store {
                     last_seen: DateTime::parse_from_rfc3339(&last_seen_str)
                         .unwrap_or_default()
                         .with_timezone(&Utc),
+                    is_quarantined: is_quarantined != 0,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -440,5 +495,399 @@ impl Store {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Check if a device MAC is already known.
+    pub fn device_exists(&self, mac: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT 1 FROM devices WHERE mac = ?1 LIMIT 1")?;
+        let exists = stmt.exists(params![mac])?;
+        Ok(exists)
+    }
+
+    /// Retrieve a single device by MAC address.
+    pub fn get_device(&self, mac: &str) -> Result<Option<Device>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT mac, ip, vendor, label, first_seen, last_seen, is_quarantined FROM devices WHERE mac = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![mac], |row| {
+            let ip_str: String = row.get(1)?;
+            let first_seen_str: String = row.get(4)?;
+            let last_seen_str: String = row.get(5)?;
+            let is_quarantined: i32 = row.get(6).unwrap_or(0);
+            Ok(Device {
+                mac: row.get(0)?,
+                ip: ip_str
+                    .parse()
+                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                vendor: row.get(2)?,
+                label: row.get(3)?,
+                first_seen: DateTime::parse_from_rfc3339(&first_seen_str)
+                    .unwrap_or_default()
+                    .with_timezone(&Utc),
+                last_seen: DateTime::parse_from_rfc3339(&last_seen_str)
+                    .unwrap_or_default()
+                    .with_timezone(&Utc),
+                is_quarantined: is_quarantined != 0,
+            })
+        })?;
+
+        if let Some(res) = rows.next() {
+            Ok(Some(res?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Insert or update an open port for a device.
+    pub fn upsert_device_port(&self, port: &DevicePort) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO device_ports (mac, port, service, is_insecure, discovered_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(mac, port) DO UPDATE SET
+                service = excluded.service,
+                is_insecure = excluded.is_insecure,
+                discovered_at = excluded.discovered_at",
+            params![
+                port.mac,
+                port.port as i32,
+                port.service,
+                port.is_insecure as i32,
+                port.discovered_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get all open ports for a specific device.
+    pub fn get_ports_for_device(&self, mac: &str) -> Result<Vec<DevicePort>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT mac, port, service, is_insecure, discovered_at FROM device_ports WHERE mac = ?1 ORDER BY port ASC",
+        )?;
+        let ports = stmt
+            .query_map(params![mac], |row| {
+                let disc_str: String = row.get(4)?;
+                Ok(DevicePort {
+                    mac: row.get(0)?,
+                    port: row.get::<_, i32>(1)? as u16,
+                    service: row.get(2)?,
+                    is_insecure: row.get::<_, i32>(3)? != 0,
+                    discovered_at: DateTime::parse_from_rfc3339(&disc_str)
+                        .unwrap_or_default()
+                        .with_timezone(&Utc),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ports)
+    }
+
+    /// Get all discovered insecure ports across the network.
+    pub fn get_all_insecure_ports(&self) -> Result<Vec<DevicePort>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT mac, port, service, is_insecure, discovered_at FROM device_ports WHERE is_insecure = 1 ORDER BY discovered_at DESC",
+        )?;
+        let ports = stmt
+            .query_map([], |row| {
+                let disc_str: String = row.get(4)?;
+                Ok(DevicePort {
+                    mac: row.get(0)?,
+                    port: row.get::<_, i32>(1)? as u16,
+                    service: row.get(2)?,
+                    is_insecure: true,
+                    discovered_at: DateTime::parse_from_rfc3339(&disc_str)
+                        .unwrap_or_default()
+                        .with_timezone(&Utc),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ports)
+    }
+
+    /// Check if an unresolved anomaly of the same kind already exists for this device within the last N hours.
+    pub fn has_recent_unresolved_anomaly(&self, mac: &str, kind: &AnomalyKind, hours: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = (Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT 1 FROM anomalies WHERE mac = ?1 AND kind = ?2 AND resolved = 0 AND detected_at > ?3 LIMIT 1",
+        )?;
+        let exists = stmt.exists(params![mac, kind.to_string(), cutoff])?;
+        Ok(exists)
+    }
+
+    /// Update quarantine status for a device.
+    pub fn set_device_quarantine(&self, mac: &str, quarantined: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE devices SET is_quarantined = ?1 WHERE mac = ?2",
+            params![quarantined as i32, mac],
+        )?;
+        Ok(())
+    }
+
+    /// Check if a device is currently quarantined.
+    pub fn is_device_quarantined(&self, mac: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT is_quarantined FROM devices WHERE mac = ?1")?;
+        let is_q: Option<i32> = stmt.query_row(params![mac], |row| row.get(0)).ok();
+        Ok(is_q.unwrap_or(0) != 0)
+    }
+
+    /// Get all quarantined devices.
+    pub fn get_quarantined_devices(&self) -> Result<Vec<Device>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT mac, ip, vendor, label, first_seen, last_seen, is_quarantined FROM devices WHERE is_quarantined = 1",
+        )?;
+        let devices = stmt
+            .query_map([], |row| {
+                let ip_str: String = row.get(1)?;
+                let first_seen_str: String = row.get(4)?;
+                let last_seen_str: String = row.get(5)?;
+                Ok(Device {
+                    mac: row.get(0)?,
+                    ip: ip_str
+                        .parse()
+                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                    vendor: row.get(2)?,
+                    label: row.get(3)?,
+                    first_seen: DateTime::parse_from_rfc3339(&first_seen_str)
+                        .unwrap_or_default()
+                        .with_timezone(&Utc),
+                    last_seen: DateTime::parse_from_rfc3339(&last_seen_str)
+                        .unwrap_or_default()
+                        .with_timezone(&Utc),
+                    is_quarantined: true,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(devices)
+    }
+
+    /// Bulk upsert threat intelligence IPs within a transaction.
+    pub fn upsert_threat_intel_ips(&self, entries: &[ThreatIntelEntry]) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut count = 0;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO threat_intel_ips (ip, feed, threat_type, confidence, description, last_updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(ip) DO UPDATE SET
+                    feed = excluded.feed,
+                    threat_type = excluded.threat_type,
+                    confidence = excluded.confidence,
+                    description = excluded.description,
+                    last_updated = excluded.last_updated",
+            )?;
+
+            for entry in entries {
+                stmt.execute(params![
+                    entry.ip,
+                    entry.feed,
+                    entry.threat_type,
+                    entry.confidence as i32,
+                    entry.description,
+                    entry.last_updated.to_rfc3339(),
+                ])?;
+                count += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Check if an IP is flagged in the threat intelligence database.
+    pub fn is_ip_malicious(&self, ip: &str) -> Result<Option<ThreatIntelEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ip, feed, threat_type, confidence, description, last_updated FROM threat_intel_ips WHERE ip = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![ip], |row| {
+            let last_updated_str: String = row.get(5)?;
+            Ok(ThreatIntelEntry {
+                ip: row.get(0)?,
+                feed: row.get(1)?,
+                threat_type: row.get(2)?,
+                confidence: row.get::<_, i32>(3)? as u8,
+                description: row.get(4)?,
+                last_updated: DateTime::parse_from_rfc3339(&last_updated_str)
+                    .unwrap_or_default()
+                    .with_timezone(&Utc),
+            })
+        })?;
+
+        if let Some(res) = rows.next() {
+            Ok(Some(res?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Retrieve summary statistics for threat intelligence.
+    pub fn get_threat_intel_stats(&self) -> Result<(usize, Vec<ThreatIntelEntry>)> {
+        let conn = self.conn.lock().unwrap();
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM threat_intel_ips",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT ip, feed, threat_type, confidence, description, last_updated FROM threat_intel_ips ORDER BY last_updated DESC LIMIT 50",
+        )?;
+        let recent = stmt
+            .query_map([], |row| {
+                let last_updated_str: String = row.get(5)?;
+                Ok(ThreatIntelEntry {
+                    ip: row.get(0)?,
+                    feed: row.get(1)?,
+                    threat_type: row.get(2)?,
+                    confidence: row.get::<_, i32>(3)? as u8,
+                    description: row.get(4)?,
+                    last_updated: DateTime::parse_from_rfc3339(&last_updated_str)
+                        .unwrap_or_default()
+                        .with_timezone(&Utc),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok((total as usize, recent))
+    }
+
+    /// Bulk upsert blocked domains within a transaction.
+    pub fn upsert_blocked_domains(&self, domains: &[String], list_source: &str) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let mut count = 0;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO blocked_domains (domain, list_source, added_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(domain) DO UPDATE SET
+                    list_source = excluded.list_source,
+                    added_at = excluded.added_at",
+            )?;
+
+            for domain in domains {
+                stmt.execute(params![domain.to_lowercase(), list_source, now])?;
+                count += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Check if a domain (or any of its parent zones) is blocked.
+    pub fn is_domain_blocked(&self, domain: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let domain_lower = domain.to_lowercase().trim_end_matches('.').to_string();
+
+        let mut stmt = conn.prepare("SELECT 1 FROM blocked_domains WHERE domain = ?1 LIMIT 1")?;
+        if stmt.exists(params![domain_lower])? {
+            return Ok(true);
+        }
+
+        // Check wildcard / parent domains e.g. "sub.example.com" -> "example.com"
+        let parts: Vec<&str> = domain_lower.split('.').collect();
+        if parts.len() > 2 {
+            for i in 1..parts.len() - 1 {
+                let parent = parts[i..].join(".");
+                if stmt.exists(params![parent])? {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Log a DNS query observation.
+    pub fn insert_dns_query(&self, log: &DnsQueryLog) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dns_queries (timestamp, client_ip, client_mac, domain, query_type, is_blocked, block_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                log.timestamp.to_rfc3339(),
+                log.client_ip.to_string(),
+                log.client_mac,
+                log.domain,
+                log.query_type,
+                log.is_blocked as i32,
+                log.block_reason,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve recent DNS queries.
+    pub fn get_recent_dns_queries(&self, limit: usize) -> Result<Vec<DnsQueryLog>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, client_ip, client_mac, domain, query_type, is_blocked, block_reason
+             FROM dns_queries ORDER BY id DESC LIMIT ?1",
+        )?;
+        let queries = stmt
+            .query_map(params![limit as i64], |row| {
+                let ts_str: String = row.get(1)?;
+                let ip_str: String = row.get(2)?;
+                Ok(DnsQueryLog {
+                    id: Some(row.get(0)?),
+                    timestamp: DateTime::parse_from_rfc3339(&ts_str)
+                        .unwrap_or_default()
+                        .with_timezone(&Utc),
+                    client_ip: ip_str
+                        .parse()
+                        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                    client_mac: row.get(3)?,
+                    domain: row.get(4)?,
+                    query_type: row.get(5)?,
+                    is_blocked: row.get::<_, i32>(6)? != 0,
+                    block_reason: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(queries)
+    }
+
+    /// Get summary stats for DNS sinkhole.
+    pub fn get_dns_stats(&self) -> Result<DnsStats> {
+        let conn = self.conn.lock().unwrap();
+        let total_queries: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dns_queries", [], |row| row.get(0))
+            .unwrap_or(0);
+        let blocked_queries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dns_queries WHERE is_blocked = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let total_blocked_domains: i64 = conn
+            .query_row("SELECT COUNT(*) FROM blocked_domains", [], |row| row.get(0))
+            .unwrap_or(0);
+        let last_query_time: Option<String> = conn
+            .query_row(
+                "SELECT timestamp FROM dns_queries ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        Ok(DnsStats {
+            total_queries: total_queries as u64,
+            blocked_queries: blocked_queries as u64,
+            total_blocked_domains: total_blocked_domains as usize,
+            last_query_time: last_query_time.and_then(|ts| {
+                DateTime::parse_from_rfc3339(&ts)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
+            }),
+        })
     }
 }

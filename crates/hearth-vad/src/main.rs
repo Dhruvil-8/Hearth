@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     }
 
     // Initialize VAD event log
-    let vad_log = log::VadLog::new("hearth_vad.db")?;
+    let _vad_log = log::VadLog::new("hearth_vad.db")?;
     tracing::info!("VAD event log initialized");
 
     // Demo: show that the model interface works

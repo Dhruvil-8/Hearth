@@ -18,6 +18,8 @@ pub fn default_config() -> Config {
     Config {
         interface: detect_default_interface(),
         dashboard_port: 7777,
+        subnet: None,
+        api_key: None,
         db_path: if cfg!(windows) {
             "./hearth.db".to_string()
         } else {
@@ -33,6 +35,9 @@ pub fn default_config() -> Config {
         } else {
             "/var/lib/hearth/GeoLite2-Country.mmdb".to_string()
         },
+        notifications: Default::default(),
+        threat_intel: Default::default(),
+        dns: Default::default(),
         devices: Vec::new(),
     }
 }

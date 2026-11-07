@@ -88,6 +88,31 @@ impl StatsEngine {
     }
 
     async fn detect_anomalies(&self, snap: &DeviceSnapshot) -> anyhow::Result<()> {
+        // Real-time Cyber Threat Intelligence match (checked immediately for all devices)
+        for (ip, _) in &snap.destinations {
+            let ip_str = ip.to_string();
+            if let Ok(Some(threat)) = self.store.is_ip_malicious(&ip_str) {
+                let already_flagged = self
+                    .store
+                    .has_recent_unresolved_anomaly(&snap.mac, &AnomalyKind::MaliciousDest, 1)
+                    .unwrap_or(false);
+                if !already_flagged {
+                    self.emit(Anomaly {
+                        id: None,
+                        mac: snap.mac.clone(),
+                        detected_at: Utc::now(),
+                        kind: AnomalyKind::MaliciousDest,
+                        detail: format!(
+                            "Outbound connection to known {} ({}): {} - {}",
+                            threat.threat_type, threat.feed, threat.ip, threat.description
+                        ),
+                        resolved: false,
+                    })
+                    .await?;
+                }
+            }
+        }
+
         let profile = match self.store.get_profile(&snap.mac)? {
             Some(p) if p.observation_hours >= 72 => p,
             _ => return Ok(()),
@@ -96,20 +121,33 @@ impl StatsEngine {
         // ExcessiveUpload
         let thresh = profile.baseline_bytes_sent_per_hour_mean
             + 3.0 * profile.baseline_bytes_sent_per_hour_stddev;
-        if thresh > 0.0 && snap.bytes_sent as f64 > thresh {
-            self.emit(Anomaly {
-                id: None,
-                mac: snap.mac.clone(),
-                detected_at: Utc::now(),
-                kind: AnomalyKind::ExcessiveUpload,
-                detail: format!(
-                    "Uploaded {} bytes — {:.1}x above baseline",
-                    snap.bytes_sent,
-                    snap.bytes_sent as f64 / profile.baseline_bytes_sent_per_hour_mean.max(1.0)
-                ),
-                resolved: false,
-            })
-            .await?;
+        let (sent_last_hour, _) = self
+            .store
+            .get_device_bytes_last_hours(&snap.mac, 1)
+            .unwrap_or((0, 0));
+        // Use max to ensure current window is accounted for without double-counting when snap is already committed to store
+        let hourly_volume = sent_last_hour.max(snap.bytes_sent) as f64;
+
+        if thresh > 0.0 && hourly_volume > thresh {
+            let already_flagged = self
+                .store
+                .has_recent_unresolved_anomaly(&snap.mac, &AnomalyKind::ExcessiveUpload, 2)
+                .unwrap_or(false);
+            if !already_flagged {
+                self.emit(Anomaly {
+                    id: None,
+                    mac: snap.mac.clone(),
+                    detected_at: Utc::now(),
+                    kind: AnomalyKind::ExcessiveUpload,
+                    detail: format!(
+                        "Uploaded {} bytes ({:.1}x above baseline)",
+                        snap.bytes_sent,
+                        hourly_volume / profile.baseline_bytes_sent_per_hour_mean.max(1.0)
+                    ),
+                    resolved: false,
+                })
+                .await?;
+            }
         }
 
         // NewDestination
@@ -139,15 +177,21 @@ impl StatsEngine {
             .parse::<u8>()
             .unwrap_or(0);
         if !profile.active_hours.contains(&h) && (snap.bytes_sent + snap.bytes_recv) > 1000 {
-            self.emit(Anomaly {
-                id: None,
-                mac: snap.mac.clone(),
-                detected_at: Utc::now(),
-                kind: AnomalyKind::UnusualHour,
-                detail: format!("Active at {}:00 — outside normal hours", h),
-                resolved: false,
-            })
-            .await?;
+            let already_flagged = self
+                .store
+                .has_recent_unresolved_anomaly(&snap.mac, &AnomalyKind::UnusualHour, 4)
+                .unwrap_or(false);
+            if !already_flagged {
+                self.emit(Anomaly {
+                    id: None,
+                    mac: snap.mac.clone(),
+                    detected_at: Utc::now(),
+                    kind: AnomalyKind::UnusualHour,
+                    detail: format!("Active at {}:00 — outside normal hours", h),
+                    resolved: false,
+                })
+                .await?;
+            }
         }
 
         Ok(())
@@ -227,6 +271,16 @@ pub fn generate_weekly_digest(store: &Store) -> anyhow::Result<WeeklyDigest> {
             AnomalyKind::NewDestination => format!("{} connected to a new server", lbl),
             AnomalyKind::UnusualHour => format!("{} was active at unusual hours", lbl),
             AnomalyKind::VoiceLeakSuspected => format!("{} may have leaked audio", lbl),
+            AnomalyKind::NewDevice => format!("New unfamiliar device detected: {}", lbl),
+            AnomalyKind::InsecurePortOpen => format!("Insecure port discovered on {}", lbl),
+            AnomalyKind::MaliciousDest => format!("CRITICAL: Malicious C2 connection from {}", lbl),
+            AnomalyKind::ArpSpoofing => format!("CRITICAL: ARP Spoofing attack involving {}", lbl),
+            AnomalyKind::RogueDhcp => format!("CRITICAL: Rogue DHCP Server detected involving {}", lbl),
+            AnomalyKind::MaliciousTlsFingerprint => format!("CRITICAL: Malicious JA3 TLS Botnet Fingerprint from {}", lbl),
+            AnomalyKind::RogueIpv6Router => format!("CRITICAL: Rogue IPv6 Router detected involving {}", lbl),
+            AnomalyKind::DgaDomainDetected => format!("ZERO-DAY: Algorithmic DGA C2 domain beacon from {}", lbl),
+            AnomalyKind::DnsTunnelingExfiltration => format!("ZERO-DAY: DNS Tunneling data exfiltration attempt from {}", lbl),
+            AnomalyKind::CanaryTripDetected => format!("ZERO-DAY: LAN Lateral Movement / Honeypot Canary tripped by {}", lbl),
         };
         highlights.push(h);
     }

@@ -17,6 +17,7 @@ pnet = "0.35"
 dns-lookup = "2.0"
 maxminddb = "0.23"
 csv = "1.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [lib]
 name = "hearth_core"

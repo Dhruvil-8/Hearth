@@ -1,7 +1,17 @@
+pub mod alerts;
+pub mod arp_guard;
+pub mod canary;
 pub mod capture;
 pub mod config;
+pub mod dhcp_guard;
+pub mod discovery;
+pub mod dns;
 pub mod geo;
+pub mod ja3;
 pub mod oui;
+pub mod ra_guard;
+pub mod scanner;
 pub mod stats;
 pub mod store;
+pub mod threat_intel;
 pub mod types;

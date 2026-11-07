@@ -11,6 +11,7 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 hearth-core = { path = "../hearth-core" }
 hearth-dashboard = { path = "../hearth-dashboard" }
+hearth-rules = { path = "../hearth-rules" }
 dns-lookup = "2.0"
 
 [[bin]]

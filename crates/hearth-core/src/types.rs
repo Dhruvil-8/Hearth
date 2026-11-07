@@ -17,6 +17,9 @@ pub struct Device {
     pub first_seen: DateTime<Utc>,
     /// Timestamp when this device was last observed
     pub last_seen: DateTime<Utc>,
+    /// Whether this device has been isolated/quarantined from the network
+    #[serde(default)]
+    pub is_quarantined: bool,
 }
 
 /// One traffic observation — written to DB every 60 seconds per device.
@@ -77,6 +80,26 @@ pub enum AnomalyKind {
     UnusualHour,
     /// hearth-vad detected upload without wake word
     VoiceLeakSuspected,
+    /// Unfamiliar device discovered on the network
+    NewDevice,
+    /// High-risk or insecure port detected (e.g. Telnet, unauthenticated RTSP)
+    InsecurePortOpen,
+    /// Outbound connection to known C2 botnet or malicious IP (from Threat Intel)
+    MaliciousDest,
+    /// ARP spoofing / MITM attack detected on LAN (e.g. gateway impersonation)
+    ArpSpoofing,
+    /// Rogue DHCP server detected offering unauthorized leases or rogue gateways
+    RogueDhcp,
+    /// Outbound TLS session initiated with a known malicious JA3/JA4 cryptographic fingerprint (C2 botnet)
+    MaliciousTlsFingerprint,
+    /// Rogue IPv6 router detected sending unauthorized SLAAC Router Advertisements (LAN hijack)
+    RogueIpv6Router,
+    /// Algorithmic DGA (Domain Generation Algorithm) zero-day C2 domain detected via heuristic Shannon entropy
+    DgaDomainDetected,
+    /// Covert DNS tunneling or data exfiltration detected in DNS query labels
+    DnsTunnelingExfiltration,
+    /// Zero-day LAN lateral movement / internal port sweep detected via honeypot canary trip
+    CanaryTripDetected,
 }
 
 impl std::fmt::Display for AnomalyKind {
@@ -86,6 +109,16 @@ impl std::fmt::Display for AnomalyKind {
             AnomalyKind::NewDestination => write!(f, "NewDestination"),
             AnomalyKind::UnusualHour => write!(f, "UnusualHour"),
             AnomalyKind::VoiceLeakSuspected => write!(f, "VoiceLeakSuspected"),
+            AnomalyKind::NewDevice => write!(f, "NewDevice"),
+            AnomalyKind::InsecurePortOpen => write!(f, "InsecurePortOpen"),
+            AnomalyKind::MaliciousDest => write!(f, "MaliciousDest"),
+            AnomalyKind::ArpSpoofing => write!(f, "ArpSpoofing"),
+            AnomalyKind::RogueDhcp => write!(f, "RogueDhcp"),
+            AnomalyKind::MaliciousTlsFingerprint => write!(f, "MaliciousTlsFingerprint"),
+            AnomalyKind::RogueIpv6Router => write!(f, "RogueIpv6Router"),
+            AnomalyKind::DgaDomainDetected => write!(f, "DgaDomainDetected"),
+            AnomalyKind::DnsTunnelingExfiltration => write!(f, "DnsTunnelingExfiltration"),
+            AnomalyKind::CanaryTripDetected => write!(f, "CanaryTripDetected"),
         }
     }
 }
@@ -98,9 +131,29 @@ impl std::str::FromStr for AnomalyKind {
             "NewDestination" => Ok(AnomalyKind::NewDestination),
             "UnusualHour" => Ok(AnomalyKind::UnusualHour),
             "VoiceLeakSuspected" => Ok(AnomalyKind::VoiceLeakSuspected),
+            "NewDevice" => Ok(AnomalyKind::NewDevice),
+            "InsecurePortOpen" => Ok(AnomalyKind::InsecurePortOpen),
+            "MaliciousDest" => Ok(AnomalyKind::MaliciousDest),
+            "ArpSpoofing" => Ok(AnomalyKind::ArpSpoofing),
+            "RogueDhcp" => Ok(AnomalyKind::RogueDhcp),
+            "MaliciousTlsFingerprint" => Ok(AnomalyKind::MaliciousTlsFingerprint),
+            "RogueIpv6Router" => Ok(AnomalyKind::RogueIpv6Router),
+            "DgaDomainDetected" => Ok(AnomalyKind::DgaDomainDetected),
+            "DnsTunnelingExfiltration" => Ok(AnomalyKind::DnsTunnelingExfiltration),
+            "CanaryTripDetected" => Ok(AnomalyKind::CanaryTripDetected),
             _ => Err(anyhow::anyhow!("Unknown AnomalyKind: {}", s)),
         }
     }
+}
+
+/// An open port detected on a device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevicePort {
+    pub mac: String,
+    pub port: u16,
+    pub service: String,
+    pub is_insecure: bool,
+    pub discovered_at: DateTime<Utc>,
 }
 
 /// Device profile — built from 72h of observation.
@@ -130,6 +183,10 @@ pub struct Config {
     /// Port for the web dashboard (default 7777)
     #[serde(default = "default_dashboard_port")]
     pub dashboard_port: u16,
+    /// Optional subnet for active discovery (e.g. "192.168.1.0/24")
+    pub subnet: Option<String>,
+    /// Optional API key for securing dashboard and API endpoints
+    pub api_key: Option<String>,
     /// Path to SQLite database file
     #[serde(default = "default_db_path")]
     pub db_path: String,
@@ -139,9 +196,167 @@ pub struct Config {
     /// Path to GeoLite2 MMDB database for country lookup
     #[serde(default = "default_geoip_db_path")]
     pub geoip_db_path: String,
+    /// Notification settings (webhook)
+    #[serde(default)]
+    pub notifications: NotificationConfig,
+    /// Threat intelligence configuration
+    #[serde(default)]
+    pub threat_intel: ThreatIntelConfig,
+    /// DNS threat sinkhole configuration
+    #[serde(default)]
+    pub dns: DnsConfig,
     /// Per-device configuration
     #[serde(default)]
     pub devices: Vec<DeviceConfig>,
+}
+
+/// Threat intelligence feed and matching configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatIntelConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_cti_feeds")]
+    pub feeds: Vec<String>,
+    #[serde(default = "default_cti_sync_hours")]
+    pub sync_interval_hours: u64,
+    /// Automatically isolate/quarantine devices upon confirmed C2 botnet contact
+    #[serde(default)]
+    pub auto_quarantine: bool,
+}
+
+impl Default for ThreatIntelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            feeds: default_cti_feeds(),
+            sync_interval_hours: default_cti_sync_hours(),
+            auto_quarantine: false,
+        }
+    }
+}
+
+fn default_cti_feeds() -> Vec<String> {
+    vec![
+        "https://feodotracker.abuse.ch/downloads/ipblocklist.txt".to_string(),
+        "https://rules.emergingthreats.net/blockrules/compromised-ips.txt".to_string(),
+    ]
+}
+
+fn default_cti_sync_hours() -> u64 {
+    24
+}
+
+/// A Threat Intelligence record for a known malicious IP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatIntelEntry {
+    pub ip: String,
+    pub feed: String,
+    pub threat_type: String,
+    pub confidence: u8,
+    pub description: String,
+    pub last_updated: DateTime<Utc>,
+}
+
+/// DNS Threat Sinkhole configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_dns_port")]
+    pub port: u16,
+    #[serde(default = "default_upstream_dns")]
+    pub upstream: String,
+    /// Optional DNS-over-HTTPS (DoH) upstream resolver URL (e.g. "https://cloudflare-dns.com/dns-query")
+    pub doh_upstream: Option<String>,
+    #[serde(default = "default_blocklist_urls")]
+    pub blocklists: Vec<String>,
+}
+
+impl Default for DnsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: default_dns_port(),
+            upstream: default_upstream_dns(),
+            doh_upstream: None,
+            blocklists: default_blocklist_urls(),
+        }
+    }
+}
+
+fn default_dns_port() -> u16 {
+    53
+}
+
+fn default_upstream_dns() -> String {
+    "1.1.1.1:53".to_string()
+}
+
+fn default_blocklist_urls() -> Vec<String> {
+    vec![
+        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts".to_string(),
+        "https://urlhaus.abuse.ch/downloads/hostfile/".to_string(),
+    ]
+}
+
+/// Record of an observed DNS query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsQueryLog {
+    pub id: Option<i64>,
+    pub timestamp: DateTime<Utc>,
+    pub client_ip: IpAddr,
+    pub client_mac: Option<String>,
+    pub domain: String,
+    pub query_type: String,
+    pub is_blocked: bool,
+    pub block_reason: Option<String>,
+}
+
+/// Summary statistics for the DNS Sinkhole.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DnsStats {
+    pub total_queries: u64,
+    pub blocked_queries: u64,
+    pub total_blocked_domains: usize,
+    pub last_query_time: Option<DateTime<Utc>>,
+}
+
+/// Webhook notification configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NotificationConfig {
+    /// Discord, Slack, or generic webhook URL
+    pub webhook_url: Option<String>,
+    /// Send alert on detected anomalies
+    #[serde(default = "default_true")]
+    pub notify_on_anomaly: bool,
+    /// Send alert when an unfamiliar device joins the network
+    #[serde(default = "default_true")]
+    pub notify_on_new_device: bool,
+    /// Send alert when insecure open ports are discovered
+    #[serde(default = "default_true")]
+    pub notify_on_vulnerability: bool,
+    /// Send alert when outbound traffic to a malicious C2 IP is detected
+    #[serde(default = "default_true")]
+    pub notify_on_malicious_traffic: bool,
+    /// Send alert when ARP spoofing / MITM attack is detected on LAN
+    #[serde(default = "default_true")]
+    pub notify_on_arp_spoofing: bool,
+    /// Send alert when Rogue DHCP server is detected on LAN
+    #[serde(default = "default_true")]
+    pub notify_on_rogue_dhcp: bool,
+    /// Optional Syslog / SIEM collector server address (e.g. "127.0.0.1:514" or "splunk.lan:514")
+    pub syslog_server: Option<String>,
+    /// Syslog format: "rfc5424" (default) or "cef" (ArcSight Common Event Format)
+    #[serde(default = "default_syslog_format")]
+    pub syslog_format: String,
+}
+
+fn default_syslog_format() -> String {
+    "rfc5424".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Per-device configuration from hearth.toml.

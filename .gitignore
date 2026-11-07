@@ -4,12 +4,28 @@
 /target_old/
 /target_review/
 /target_verify/
+*.dll
+*.exe
+*.a
+*.lib
+*.so
+*.dylib
+*.log
 
 # Database files
 *.db
 *.db-shm
 *.db-wal
 hearth_vad.db
+
+# Secrets & Local Configs
+.env
+*.env.*
+*.secret
+*.key
+*.pem
+*.cert
+*.token
 
 # IDE
 .idea/

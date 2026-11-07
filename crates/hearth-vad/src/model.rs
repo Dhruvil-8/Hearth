@@ -1,7 +1,9 @@
-/// Voice Activity Detection model interface.
-///
-/// In production, this loads Silero VAD ONNX model via tract-onnx.
-/// For cross-platform builds, we provide a simple energy-based fallback.
+#![allow(dead_code)]
+
+//! Voice Activity Detection model interface.
+//!
+//! In production, this loads Silero VAD ONNX model via tract-onnx.
+//! For cross-platform builds, we provide a simple energy-based fallback.
 
 /// Score a single 512-sample audio chunk for speech probability.
 /// Returns a value in [0.0, 1.0] where > 0.5 indicates speech.
@@ -12,8 +14,7 @@ pub fn score_chunk(audio: &[f32; 512]) -> f32 {
 
     // Map RMS to a probability-like score
     // Silence (rms ~0) → 0.0, Speech (rms > 0.02) → high score
-    let score = (rms * 50.0).min(1.0);
-    score
+    (rms * 50.0).min(1.0)
 }
 
 /// Check if a wake word is likely present in recent audio.

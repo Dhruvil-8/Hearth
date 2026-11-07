@@ -1,12 +1,16 @@
 use pnet::datalink::{self, Channel::Ethernet, Config as PnetConfig};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
+use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::ipv6::Ipv6Packet;
+use pnet::packet::tcp::TcpPacket;
+use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use crate::types::Anomaly;
 
 /// A snapshot of a single device's traffic within a 60-second window.
 #[derive(Debug, Clone)]
@@ -42,16 +46,10 @@ fn format_mac(bytes: &[u8]) -> String {
 }
 
 /// Start the packet capture loop on the given network interface.
-///
-/// Runs in a blocking `std::thread` -- sends `Vec<DeviceSnapshot>` via the
-/// provided tokio mpsc channel every 60 seconds.
-///
-/// # Arguments
-/// * `interface_name` -- Name of the network interface to capture on
-/// * `tx` -- Channel sender to emit device snapshots
 pub fn start_capture(
     interface_name: &str,
     tx: mpsc::Sender<Vec<DeviceSnapshot>>,
+    anomaly_tx: Option<mpsc::Sender<Anomaly>>,
 ) -> anyhow::Result<()> {
     let interfaces = datalink::interfaces();
     let interface = interfaces
@@ -102,6 +100,7 @@ pub fn start_capture(
     let window_duration = Duration::from_secs(60);
     let mut window_start = Instant::now();
     let mut devices: HashMap<String, DeviceAccum> = HashMap::new();
+    let canary_engine = crate::canary::CanaryEngine::new();
 
     loop {
         match rx.next() {
@@ -115,6 +114,66 @@ pub fn start_capture(
                     let (src_ip, dst_ip) = match eth.get_ethertype() {
                         EtherTypes::Ipv4 => {
                             if let Some(ipv4) = Ipv4Packet::new(eth.payload()) {
+                                if let Some(ref a_tx) = anomaly_tx {
+                                    if ipv4.get_next_level_protocol() == IpNextHeaderProtocols::Tcp {
+                                        if let Some(tcp) = TcpPacket::new(ipv4.payload()) {
+                                            // Zero-Day Deception: Check lateral movement / worm propagation against sensitive ports & canaries
+                                            if let Some(canary_anomaly) = canary_engine.inspect_lateral_traffic(
+                                                &src_mac,
+                                                IpAddr::V4(ipv4.get_source()),
+                                                IpAddr::V4(ipv4.get_destination()),
+                                                tcp.get_destination(),
+                                            ) {
+                                                let _ = a_tx.try_send(canary_anomaly);
+                                            }
+
+                                            if let Some(anomaly) = crate::ja3::inspect_tls_traffic(
+                                                tcp.payload(),
+                                                &src_mac,
+                                                IpAddr::V4(ipv4.get_source()),
+                                            ) {
+                                                let _ = a_tx.try_send(anomaly);
+                                            }
+                                        }
+                                    } else if ipv4.get_next_level_protocol() == IpNextHeaderProtocols::Udp {
+                                        if let Some(udp) = UdpPacket::new(ipv4.payload()) {
+                                            // Zero-Day Deception: Check UDP lateral movement / worm probes
+                                            if let Some(canary_anomaly) = canary_engine.inspect_lateral_traffic(
+                                                &src_mac,
+                                                IpAddr::V4(ipv4.get_source()),
+                                                IpAddr::V4(ipv4.get_destination()),
+                                                udp.get_destination(),
+                                            ) {
+                                                let _ = a_tx.try_send(canary_anomaly);
+                                            }
+
+                                            if (udp.get_source() == 67 || udp.get_destination() == 68)
+                                                && udp.payload().len() >= 240
+                                            {
+                                                if let Some(info) = crate::dhcp_guard::DhcpGuard::parse_dhcp_payload(udp.payload()) {
+                                                    if info.op == 2 || info.message_type == Some(2) || info.message_type == Some(5) {
+                                                        if let Some(rogue_router) = info.router_ip {
+                                                            if rogue_router != IpAddr::V4(ipv4.get_source()) {
+                                                                let detail = format!(
+                                                                    "CRITICAL: Rogue DHCP Server detected via passive capture! Server IP: {} (MAC: {}). Offering alternate gateway: {}. Suspected LAN Traffic Hijack!",
+                                                                    ipv4.get_source(), src_mac, rogue_router
+                                                                );
+                                                                let _ = a_tx.try_send(Anomaly {
+                                                                    id: None,
+                                                                    mac: src_mac.clone(),
+                                                                    detected_at: chrono::Utc::now(),
+                                                                    kind: crate::types::AnomalyKind::RogueDhcp,
+                                                                    detail,
+                                                                    resolved: false,
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 (
                                     IpAddr::V4(ipv4.get_source()),
                                     IpAddr::V4(ipv4.get_destination()),
@@ -125,6 +184,25 @@ pub fn start_capture(
                         }
                         EtherTypes::Ipv6 => {
                             if let Some(ipv6) = Ipv6Packet::new(eth.payload()) {
+                                if let Some(ref a_tx) = anomaly_tx {
+                                    if ipv6.get_next_header() == IpNextHeaderProtocols::Tcp {
+                                        if let Some(tcp) = TcpPacket::new(ipv6.payload()) {
+                                            if let Some(anomaly) = crate::ja3::inspect_tls_traffic(
+                                                tcp.payload(),
+                                                &src_mac,
+                                                IpAddr::V6(ipv6.get_source()),
+                                            ) {
+                                                let _ = a_tx.try_send(anomaly);
+                                            }
+                                        }
+                                    } else if ipv6.get_next_header() == IpNextHeaderProtocols::Icmpv6 {
+                                        if let Some(ra_info) = crate::ra_guard::RaGuard::parse_router_advert(ipv6.payload()) {
+                                            if ra_info.router_lifetime_secs > 0 {
+                                                tracing::info!("Observed active IPv6 Router Advertisement from MAC {} (prefixes: {:?})", src_mac, ra_info.prefixes);
+                                            }
+                                        }
+                                    }
+                                }
                                 (
                                     IpAddr::V6(ipv6.get_source()),
                                     IpAddr::V6(ipv6.get_destination()),
@@ -210,12 +288,15 @@ pub fn start_capture(
 
 /// Start a demo capture loop that generates synthetic traffic data.
 /// Useful for testing on systems without packet capture capability.
-pub fn start_demo_capture(tx: mpsc::Sender<Vec<DeviceSnapshot>>) -> anyhow::Result<()> {
+pub fn start_demo_capture(
+    tx: mpsc::Sender<Vec<DeviceSnapshot>>,
+    _anomaly_tx: Option<mpsc::Sender<Anomaly>>,
+) -> anyhow::Result<()> {
     use std::net::Ipv4Addr;
 
     tracing::info!("Starting DEMO capture mode (synthetic data)");
 
-    let demo_devices = vec![
+    let demo_devices = [
         ("AA:BB:CC:DD:EE:01", "192.168.1.100", "Samsung TV"),
         ("AA:BB:CC:DD:EE:02", "192.168.1.101", "Echo Dot"),
         ("AA:BB:CC:DD:EE:03", "192.168.1.102", "Philips Hue Bridge"),
@@ -223,7 +304,7 @@ pub fn start_demo_capture(tx: mpsc::Sender<Vec<DeviceSnapshot>>) -> anyhow::Resu
         ("AA:BB:CC:DD:EE:05", "192.168.1.104", "Laptop"),
     ];
 
-    let destinations = vec![
+    let destinations = [
         ("142.250.80.46", "google.com"),       // Google
         ("31.13.71.36", "facebook.com"),       // Facebook
         ("54.239.26.128", "alexa.amazon.com"), // Amazon
