@@ -16,6 +16,7 @@ pub struct NetworkScanner {
     store: Arc<Store>,
     oui_db: Arc<OuiDb>,
     anomaly_tx: Option<mpsc::Sender<Anomaly>>,
+    canary_engine: Option<Arc<crate::canary::CanaryEngine>>,
 }
 
 impl NetworkScanner {
@@ -28,7 +29,14 @@ impl NetworkScanner {
             store,
             oui_db,
             anomaly_tx,
+            canary_engine: None,
         }
+    }
+
+    /// Attach a canary deception engine to dynamically register dark unassigned IPs.
+    pub fn with_canary_engine(mut self, canary: Arc<crate::canary::CanaryEngine>) -> Self {
+        self.canary_engine = Some(canary);
+        self
     }
 
     /// Auto-detect the local IPv4 subnet base (e.g. "192.168.1").
@@ -145,6 +153,20 @@ impl NetworkScanner {
 
         let arp_entries = Self::read_arp_cache();
         tracing::info!("ARP scan identified {} local devices", arp_entries.len());
+
+        // Register dark / unassigned subnet IPs as active deception canary honeypots
+        if let (Some(base_octets), Some(ref canary)) = (base, &self.canary_engine) {
+            let mut dark_ips = Vec::new();
+            for host in 1..255 {
+                let ip = IpAddr::V4(Ipv4Addr::new(base_octets[0], base_octets[1], base_octets[2], host));
+                if !arp_entries.contains_key(&ip) {
+                    dark_ips.push(ip);
+                }
+            }
+            let count = dark_ips.len();
+            canary.register_canary_ips(dark_ips);
+            tracing::info!("Registered {} dark/unassigned canary IPs on the local subnet for deception defense", count);
+        }
 
         let iot_names = discover_iot_friendly_names().await;
         if !iot_names.is_empty() {

@@ -16,6 +16,10 @@ struct Cli {
     #[arg(long)]
     api_key: Option<String>,
 
+    /// Output structured JSON (optimal for terminal LLMs, automated agents, and scripts)
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -40,6 +44,10 @@ enum Commands {
     Rules,
     /// Show security overview and open ports
     Security,
+    /// View AI Security Analyst & Defensive Swarm status, model, and user permissions
+    Ai,
+    /// Trigger on-demand AI Defensive Swarm forensic investigation on a device
+    Investigate { mac: String },
     /// Assign a friendly name to a device
     Label { mac: String, name: String },
     /// Block a device's outbound traffic
@@ -84,6 +92,17 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Status => {
             let summary = http_get(&format!("{}/api/summary", base), key).await?;
+            let devices = http_get(&format!("{}/api/devices", base), key).await?;
+            if cli.json {
+                let s_val: serde_json::Value = serde_json::from_str(&summary).unwrap_or_default();
+                let d_val: serde_json::Value = serde_json::from_str(&devices).unwrap_or_default();
+                println!("{}", serde_json::json!({
+                    "summary": s_val,
+                    "devices": d_val
+                }));
+                return Ok(());
+            }
+
             let s: serde_json::Value = serde_json::from_str(&summary)?;
             println!("HEARTH STATUS");
             println!("--------------------------------------");
@@ -99,7 +118,6 @@ async fn main() -> Result<()> {
             );
             println!("--------------------------------------");
 
-            let devices = http_get(&format!("{}/api/devices", base), key).await?;
             let devs: Vec<serde_json::Value> = serde_json::from_str(&devices)?;
             if !devs.is_empty() {
                 println!(
@@ -131,6 +149,10 @@ async fn main() -> Result<()> {
 
         Commands::Devices => {
             let body = http_get(&format!("{}/api/devices", base), key).await?;
+            if cli.json {
+                println!("{}", body);
+                return Ok(());
+            }
             let devs: Vec<serde_json::Value> = serde_json::from_str(&body)?;
             println!("{:<20} {:<18} {:<16} Last Seen", "Label", "MAC", "IP");
             println!("{}", "-".repeat(70));
@@ -154,7 +176,7 @@ async fn main() -> Result<()> {
                     println!("Device: {}", mac);
                     println!("Observation: {}h / 72h required", p["observation_hours"]);
                     println!(
-                        "Baseline: {:.0} ± {:.0} bytes/hr",
+                        "Baseline: {:.0} +/- {:.0} bytes/hr",
                         p["baseline_bytes_sent_per_hour_mean"]
                             .as_f64()
                             .unwrap_or(0.0),
@@ -185,6 +207,10 @@ async fn main() -> Result<()> {
 
         Commands::Anomalies => {
             let body = http_get(&format!("{}/api/anomalies", base), key).await?;
+            if cli.json {
+                println!("{}", body);
+                return Ok(());
+            }
             let anomalies: Vec<serde_json::Value> = serde_json::from_str(&body)?;
             if anomalies.is_empty() {
                 println!("No active anomalies.");
@@ -239,6 +265,10 @@ async fn main() -> Result<()> {
 
         Commands::Rules => {
             let body = http_get(&format!("{}/api/rules", base), key).await?;
+            if cli.json {
+                println!("{}", body);
+                return Ok(());
+            }
             let actions: Vec<serde_json::Value> = serde_json::from_str(&body)?;
             println!("=== Active Firewall Rules ===");
             if actions.is_empty() {
@@ -246,7 +276,7 @@ async fn main() -> Result<()> {
             } else {
                 for act in &actions {
                     println!(
-                        "[{}] {} — Reason: {}",
+                        "[{}] {} - Reason: {}",
                         act["mac"].as_str().unwrap_or("?"),
                         act["action"],
                         act["reason"].as_str().unwrap_or("?")
@@ -257,6 +287,10 @@ async fn main() -> Result<()> {
 
         Commands::Security => {
             let body = http_get(&format!("{}/api/security", base), key).await?;
+            if cli.json {
+                println!("{}", body);
+                return Ok(());
+            }
             let s: serde_json::Value = serde_json::from_str(&body)?;
             println!("=== Hearth Security Overview ===");
             println!("Total monitored devices:        {}", s["total_devices"]);
@@ -283,15 +317,15 @@ async fn main() -> Result<()> {
             if let Ok(anom_res) = http_get(&format!("{}/api/anomalies", base), key).await {
                 if let Ok(anomalies) = serde_json::from_str::<Vec<serde_json::Value>>(&anom_res) {
                     if !anomalies.is_empty() {
-                        println!("\n🚨 Active Threat Anomalies & Zero-Day Detections:");
+                        println!("\n[THREATS] Active Threat Anomalies & Zero-Day Detections:");
                         for a in anomalies {
                             let kind_str = a["kind"].as_str().unwrap_or("?");
                             let is_zero_day = kind_str == "CanaryTripDetected"
                                 || kind_str == "DgaDomainDetected"
                                 || kind_str == "DnsTunnelingExfiltration";
-                            let tag = if is_zero_day { "⚡ [ZERO-DAY]" } else { "🚨 [ANOMALY]" };
+                            let tag = if is_zero_day { "[ZERO-DAY]" } else { "[ANOMALY]" };
                             println!(
-                                "  {} {:<24} MAC: {:<18} {}",
+                                "  {:<12} {:<24} MAC: {:<18} {}",
                                 tag,
                                 kind_str,
                                 a["mac"].as_str().unwrap_or("?"),
@@ -299,6 +333,63 @@ async fn main() -> Result<()> {
                             );
                         }
                     }
+                }
+            }
+        }
+
+        Commands::Ai => {
+            let body = http_get(&format!("{}/api/ai/status", base), key).await?;
+            if cli.json {
+                println!("{}", body);
+                return Ok(());
+            }
+            let s: serde_json::Value = serde_json::from_str(&body)?;
+            println!("=== Hearth Autonomous AI Security Analyst & Swarm ===");
+            let active = s["enabled"].as_bool().unwrap_or(false);
+            println!("Status:                 {}", if active { "ENABLED (Reflex + Brain)" } else { "DISABLED (Pure Deterministic Rust)" });
+            println!("Multi-Agent Swarm:      {}", if s["swarm_enabled"].as_bool().unwrap_or(false) { "ACTIVE [Threat Hunter, Forensics Auditor, Containment Commander]" } else { "Single Agent" });
+            println!("Target Model:           {}", s["model"].as_str().unwrap_or("-"));
+            println!("Endpoint:               {}", s["endpoint"].as_str().unwrap_or("-"));
+            println!("Timeout:                {}s", s["timeout_seconds"].as_u64().unwrap_or(60));
+            println!("Autonomous Action:      {}", if s["autonomous_action"].as_bool().unwrap_or(false) { "AUTHORIZED (Proactive Hardware Quarantine Enabled)" } else { "DISABLED (Human Approval Required)" });
+            println!("Confidence Threshold:   {:.0}%", s["confidence_threshold"].as_f64().unwrap_or(0.85) * 100.0);
+            if let Some(macs) = s["protected_macs"].as_array() {
+                if !macs.is_empty() {
+                    let mac_list: Vec<&str> = macs.iter().filter_map(|m| m.as_str()).collect();
+                    println!("Protected MACs Whitelist: {}", mac_list.join(", "));
+                } else {
+                    println!("Protected MACs Whitelist: None configured");
+                }
+            }
+        }
+
+        Commands::Investigate { mac } => {
+            let enc = mac.replace(":", "%3A");
+            let resp = http_post(&format!("{}/api/ai/investigate/{}", base, enc), key).await?;
+            if cli.json {
+                println!("{}", resp);
+                return Ok(());
+            }
+            let val: serde_json::Value = serde_json::from_str(&resp)?;
+            println!("=== AI Defensive Swarm Investigation: {} ===", mac);
+            if let Some(dec) = val.get("decision") {
+                println!("Confidence:         {:.0}%", dec["confidence"].as_f64().unwrap_or(0.0) * 100.0);
+                println!("Threat Severity:    {}", dec["threat_severity"].as_str().unwrap_or("?"));
+                println!("Recommended Action: {}", dec["recommended_action"].as_str().unwrap_or("?"));
+                println!("Forensic Summary:   {}", dec["forensic_summary"].as_str().unwrap_or("?"));
+                if let Some(mitre) = dec["mitre_techniques"].as_array() {
+                    let techs: Vec<&str> = mitre.iter().filter_map(|t| t.as_str()).collect();
+                    if !techs.is_empty() {
+                        println!("MITRE ATT&CK:       {}", techs.join(", "));
+                    }
+                }
+                println!("\nMulti-Agent Reasoning:\n{}", dec["reasoning"].as_str().unwrap_or(""));
+            }
+            if let Some(guard) = val.get("guardrails") {
+                let allowed = guard["allowed_to_quarantine"].as_bool().unwrap_or(false);
+                println!("\nGuardrail Status:   {}", if allowed { "PASSED (Safe to quarantine)" } else { "VETOED" });
+                if let Some(reason) = guard["veto_reason"].as_str() {
+                    println!("Veto Reason:        {}", reason);
                 }
             }
         }
@@ -311,29 +402,43 @@ async fn main() -> Result<()> {
         }
 
         Commands::Block { mac, hours: _ } => {
-            println!("Applying firewall block for {}...", mac);
             let res = http_post(&format!("{}/api/devices/{}/quarantine", base, mac), key).await?;
-            let val: serde_json::Value = serde_json::from_str(&res)?;
-            println!("🛡️  {}", val["message"].as_str().unwrap_or("Device blocked at firewall"));
+            if cli.json {
+                println!("{}", res);
+            } else {
+                let val: serde_json::Value = serde_json::from_str(&res)?;
+                println!("[BLOCKED] {}", val["message"].as_str().unwrap_or("Device blocked at firewall"));
+            }
         }
 
         Commands::Unblock { mac } => {
-            println!("Removing firewall block for {}...", mac);
             let res = http_post(&format!("{}/api/devices/{}/unquarantine", base, mac), key).await?;
-            let val: serde_json::Value = serde_json::from_str(&res)?;
-            println!("✅ {}", val["message"].as_str().unwrap_or("Device unblocked"));
+            if cli.json {
+                println!("{}", res);
+            } else {
+                let val: serde_json::Value = serde_json::from_str(&res)?;
+                println!("[UNBLOCKED] {}", val["message"].as_str().unwrap_or("Device unblocked"));
+            }
         }
 
         Commands::Quarantine { mac } => {
             let res = http_post(&format!("{}/api/devices/{}/quarantine", base, mac), key).await?;
-            let val: serde_json::Value = serde_json::from_str(&res)?;
-            println!("🛡️  {}", val["message"].as_str().unwrap_or("Device quarantined"));
+            if cli.json {
+                println!("{}", res);
+            } else {
+                let val: serde_json::Value = serde_json::from_str(&res)?;
+                println!("[QUARANTINED] {}", val["message"].as_str().unwrap_or("Device quarantined"));
+            }
         }
 
         Commands::Unquarantine { mac } => {
             let res = http_post(&format!("{}/api/devices/{}/unquarantine", base, mac), key).await?;
-            let val: serde_json::Value = serde_json::from_str(&res)?;
-            println!("✅ {}", val["message"].as_str().unwrap_or("Quarantine removed"));
+            if cli.json {
+                println!("{}", res);
+            } else {
+                let val: serde_json::Value = serde_json::from_str(&res)?;
+                println!("[RESTORED] {}", val["message"].as_str().unwrap_or("Quarantine removed"));
+            }
         }
 
         Commands::Dns => {
@@ -366,7 +471,7 @@ async fn main() -> Result<()> {
                     let client = q["client_ip"].as_str().unwrap_or("-");
                     let domain = q["domain"].as_str().unwrap_or("-");
                     let is_blocked = q["is_blocked"].as_bool().unwrap_or(false);
-                    let action = if is_blocked { "🛑 BLOCKED (Sinkholed)" } else { "✅ Resolved" };
+                    let action = if is_blocked { "[BLOCKED Sinkhole]" } else { "[OK Resolved]" };
                     println!("{:<24} {:<16} {:<32} {}", &ts[..19.min(ts.len())], client, domain, action);
                 }
             }

@@ -92,6 +92,13 @@ timeout_seconds = 60
 # - true: AI can trigger proactive quarantine within strict deterministic guardrails.
 autonomous_action = false
 
+# Autonomous Defensive Swarm:
+# When true, launches a concurrent swarm of specialized micro-agents:
+#   1. Threat Hunter Agent: Attribution & C2 framework fingerprinting (Cobalt Strike, Sliver, Mirai).
+#   2. Forensics Auditor Agent: MITRE ATT&CK enterprise technique mapping & entropy correlation.
+#   3. Containment Commander Agent: Blast radius calculation & isolation urgency assessment.
+enable_agent_swarm = true
+
 # Minimum AI confidence score (0.0 to 1.0) required before any autonomous action is permitted
 confidence_threshold = 0.85
 
@@ -100,6 +107,15 @@ confidence_threshold = 0.85
 protected_macs = [
     # "00:11:22:33:44:55",
 ]
+
+# Fine-Grained User-Defined AI Permission Rules
+# User can grant or restrict operational authority separately:
+[ai_analyst.permissions]
+allow_quarantine = true          # Permit AI to apply hardware firewall isolation on attacking devices
+allow_dns_sinkhole = true        # Permit AI to dynamically sinkhole zero-day C2 domains
+allow_network_scans = true       # Permit AI to trigger active discovery and port sweeps
+allow_resolve_anomalies = true   # Permit AI to resolve mitigated anomalies
+max_actions_per_hour = 20        # Anti-runaway circuit breaker rate limit
 
 # Friendly device names and soft-blocking enforcement rules
 # [[devices]]

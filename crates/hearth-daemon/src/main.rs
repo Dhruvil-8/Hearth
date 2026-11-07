@@ -1,6 +1,7 @@
 use hearth_core::ai_analyst::AiAnalyst;
 use hearth_core::alerts::AlertDispatcher;
 use hearth_core::arp_guard::ArpGuard;
+use hearth_core::canary::CanaryEngine;
 use hearth_core::capture::{start_capture, start_demo_capture, DeviceSnapshot};
 use hearth_core::config;
 use hearth_core::dhcp_guard::DhcpGuard;
@@ -74,7 +75,40 @@ async fn main() -> anyhow::Result<()> {
     let (snapshot_tx, mut snapshot_rx) = mpsc::channel::<Vec<DeviceSnapshot>>(64);
     let (anomaly_tx, mut anomaly_rx) = mpsc::channel::<Anomaly>(256);
 
-    // 7. Spawn dashboard
+    // 7. Security guards & Deception Honeypot Canary engine
+    let canary_engine = Arc::new(CanaryEngine::new());
+
+    let arp_guard = Arc::new(ArpGuard::new(
+        Arc::clone(&store),
+        anomaly_tx.clone(),
+    ));
+    if let Some(gw_ip_str) = &cfg.gateway_ip {
+        if let Ok(gw_ip) = gw_ip_str.parse::<std::net::IpAddr>() {
+            let gw_mac = cfg.gateway_mac.as_deref().unwrap_or("");
+            arp_guard.set_static_gateway(gw_ip, gw_mac).await;
+        }
+    }
+    arp_guard.clone().start_monitor(30);
+
+    let dhcp_guard = Arc::new(DhcpGuard::new(
+        Arc::clone(&store),
+        anomaly_tx.clone(),
+    ));
+    if let Some(gw_ip_str) = &cfg.gateway_ip {
+        if let Ok(gw_ip) = gw_ip_str.parse::<std::net::IpAddr>() {
+            dhcp_guard.authorize_server(gw_ip);
+        }
+    }
+
+    let ra_guard = Arc::new(RaGuard::new(
+        Arc::clone(&store),
+        anomaly_tx.clone(),
+    ));
+    if let Some(gw_mac_str) = &cfg.gateway_mac {
+        ra_guard.authorize_router(gw_mac_str);
+    }
+
+    // 8. Spawn dashboard
     let dash_store = Arc::clone(&store);
     let dash_port = cfg.dashboard_port;
     let dash_cfg = cfg.clone();
@@ -88,13 +122,23 @@ async fn main() -> anyhow::Result<()> {
         cfg.dashboard_port
     );
 
-    // 8. Spawn capture thread
+    // 9. Spawn capture thread with Canary engine, RA-Guard, and DHCP-Guard attached
     let iface = cfg.interface.clone();
     let cap_tx = snapshot_tx.clone();
     let cap_anomaly_tx = anomaly_tx.clone();
+    let cap_canary = Arc::clone(&canary_engine);
+    let cap_ra = Arc::clone(&ra_guard);
+    let cap_dhcp = Arc::clone(&dhcp_guard);
     std::thread::spawn(move || {
         // Try real capture first, fall back to demo mode
-        match start_capture(&iface, cap_tx.clone(), Some(cap_anomaly_tx.clone())) {
+        match start_capture(
+            &iface,
+            cap_tx.clone(),
+            Some(cap_anomaly_tx.clone()),
+            Some(cap_canary),
+            Some(cap_ra),
+            Some(cap_dhcp),
+        ) {
             Ok(()) => {}
             Err(e) => {
                 tracing::warn!("Real capture failed ({}), switching to demo mode", e);
@@ -105,10 +149,10 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 9. Stats engine
+    // 10. Stats engine
     let stats = StatsEngine::new(Arc::clone(&store), anomaly_tx.clone());
 
-    // 10. Rules engine background enforcement loop
+    // 11. Rules engine background enforcement loop
     let rules_engine = Arc::new(RulesEngine::new(cfg.clone(), Arc::clone(&store)));
     let rules_engine_task = Arc::clone(&rules_engine);
     tokio::spawn(async move {
@@ -129,12 +173,15 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 11. Active network discovery & IoT vulnerability scanner task
-    let net_scanner = Arc::new(NetworkScanner::new(
-        Arc::clone(&store),
-        Arc::clone(&oui_db),
-        Some(anomaly_tx.clone()),
-    ));
+    // 12. Active network discovery & IoT vulnerability scanner task
+    let net_scanner = Arc::new(
+        NetworkScanner::new(
+            Arc::clone(&store),
+            Arc::clone(&oui_db),
+            Some(anomaly_tx.clone()),
+        )
+        .with_canary_engine(Arc::clone(&canary_engine)),
+    );
     let port_scanner = Arc::new(PortScanner::new(
         Arc::clone(&store),
         Some(anomaly_tx.clone()),
@@ -165,43 +212,31 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 12. Cyber Threat Intelligence (CTI) Feed Synchronizer
+    // 13. Cyber Threat Intelligence (CTI) Feed Synchronizer
     let threat_intel = Arc::new(ThreatIntelManager::new(
         Arc::clone(&store),
         cfg.threat_intel.clone(),
     ));
     threat_intel.start_sync_worker();
 
-    // 13. Anti-ARP Spoofing & MITM Guard
-    let arp_guard = Arc::new(ArpGuard::new(
-        Arc::clone(&store),
-        anomaly_tx.clone(),
-    ));
-    arp_guard.clone().start_monitor(30);
-
-    // 14. Anti-Rogue DHCP Guard (Anti-LAN hijacking)
-    let dhcp_guard = Arc::new(DhcpGuard::new(
-        Arc::clone(&store),
-        anomaly_tx.clone(),
-    ));
+    // 14. Anti-Rogue DHCP Guard UDP port 68 listener (fallback interceptor)
     let dhcp_guard_task = Arc::clone(&dhcp_guard);
     tokio::spawn(async move {
         // Attempt to bind UDP port 68 to intercept DHCP offers; falls back gracefully if port is taken
         if let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:68").await {
             let mut buf = [0u8; 1500];
             while let Ok((len, src)) = socket.recv_from(&mut buf).await {
-                let _ = dhcp_guard_task.inspect_dhcp(src.ip(), "UNKNOWN", &buf[..len]).await;
+                let sender_mac = NetworkScanner::read_arp_cache()
+                    .into_iter()
+                    .find(|(ip, _mac)| *ip == src.ip())
+                    .map(|(_ip, mac)| mac)
+                    .unwrap_or_else(|| "UNKNOWN".to_string());
+                let _ = dhcp_guard_task.inspect_dhcp(src.ip(), &sender_mac, &buf[..len]);
             }
         }
     });
 
-    // 15. Anti-Rogue IPv6 Router Guard (RFC 6105 RA-Guard)
-    let _ra_guard = Arc::new(RaGuard::new(
-        Arc::clone(&store),
-        anomaly_tx.clone(),
-    ));
-
-    // 16. Native DNS Threat Sinkhole with Zero-Day Heuristic DGA & Tunneling Anomaly Engine
+    // 15. Native DNS Threat Sinkhole with Zero-Day Heuristic DGA & Tunneling Anomaly Engine
     let dns_sinkhole = Arc::new(
         DnsSinkhole::new(Arc::clone(&store), cfg.dns.clone())
             .with_anomaly_tx(anomaly_tx.clone()),
@@ -257,22 +292,29 @@ async fn main() -> anyhow::Result<()> {
             // If user enabled AI Analyst, submit sanitized incident dossier to the configured local/API LLM.
             let mut ai_handled_quarantine = false;
             if ai_analyst_enabled {
-                tracing::info!("🤖 Invoking AI Analyst for anomaly on device {}...", anomaly.mac);
+                tracing::info!("[AI-ANALYST] Invoking AI Analyst for anomaly on device {}...", anomaly.mac);
                 match ai_analyst.evaluate_incident(&anomaly, label.as_deref(), None).await {
                     Ok(decision) => {
+                        let mitre_str = if !decision.mitre_techniques.is_empty() {
+                            format!(" | MITRE ATT&CK: {}", decision.mitre_techniques.join(", "))
+                        } else {
+                            String::new()
+                        };
                         tracing::info!(
-                            "🧠 AI Analyst Assessment [{}]: Confidence={:.2}, Severity={:?}, Action={:?}\nReasoning: {}",
+                            "[AI-SWARM] Consensus [{}]: Confidence={:.2}, Severity={:?}, Action={:?}{}\nForensic: {}\nReasoning: {}",
                             anomaly.mac,
                             decision.confidence,
                             decision.threat_severity,
                             decision.recommended_action,
+                            mitre_str,
+                            decision.forensic_summary,
                             decision.reasoning
                         );
 
                         let guardrail_eval = ai_analyst.validate_guardrails(&anomaly.mac, &decision, is_gateway);
                         if guardrail_eval.allowed_to_quarantine {
                             tracing::warn!(
-                                "🛡️ AI AUTONOMOUS QUARANTINE EXECUTING: Device {} isolated based on verified high-confidence AI reasoning!",
+                                "[DEFENSE-ACTION] AI Autonomous quarantine executing: Device {} isolated based on verified high-confidence AI reasoning!",
                                 anomaly.mac
                             );
                             if let Err(e) = auto_quarantine_rules.quarantine_device(&anomaly.mac).await {
@@ -280,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
                             }
                             ai_handled_quarantine = true;
                         } else if let Some(veto) = guardrail_eval.veto_reason {
-                            tracing::info!("🛡️ Guardrail Veto for {}: {}", anomaly.mac, veto);
+                            tracing::info!("[GUARDRAIL] Veto for {}: {}", anomaly.mac, veto);
                         }
                     }
                     Err(e) => {
@@ -296,7 +338,9 @@ async fn main() -> anyhow::Result<()> {
                     || anomaly.kind == AnomalyKind::MaliciousTlsFingerprint
                     || anomaly.kind == AnomalyKind::CanaryTripDetected
                     || anomaly.kind == AnomalyKind::DgaDomainDetected
-                    || anomaly.kind == AnomalyKind::DnsTunnelingExfiltration)
+                    || anomaly.kind == AnomalyKind::DnsTunnelingExfiltration
+                    || anomaly.kind == AnomalyKind::RogueDhcp
+                    || anomaly.kind == AnomalyKind::RogueIpv6Router)
             {
                 let is_critical_infra = anomaly.mac == "00:00:00:00:00:00"
                     || anomaly.mac == "FF:FF:FF:FF:FF:FF"
@@ -305,12 +349,12 @@ async fn main() -> anyhow::Result<()> {
 
                 if is_critical_infra {
                     tracing::error!(
-                        "🛡️ SECURITY GUARD: Auto-quarantine suppressed for critical infrastructure / default gateway MAC {}!",
+                        "[SECURITY-GUARD] Auto-quarantine suppressed for critical infrastructure / default gateway MAC {}!",
                         anomaly.mac
                     );
                 } else {
                     tracing::warn!(
-                        "🚨 AUTONOMOUS DEFENSE TRIGGERED: Auto-quarantining device {} due to confirmed threat ({})!",
+                        "[AUTONOMOUS-DEFENSE] Auto-quarantining device {} due to confirmed threat ({})!",
                         anomaly.mac, anomaly.kind
                     );
                     if let Err(e) = auto_quarantine_rules.quarantine_device(&anomaly.mac).await {

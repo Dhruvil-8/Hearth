@@ -129,14 +129,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
   <div class="header-actions">
     <nav class="nav">
       <button class="active" onclick="showTab('overview')" id="tab-overview">Overview</button>
-      <button onclick="showTab('security')" id="tab-security">🛡️ Security</button>
-      <button onclick="showTab('dns')" id="tab-dns">🌐 DNS Sinkhole</button>
-      <button onclick="showTab('threats')" id="tab-threats">⚠️ Threat Intel</button>
+      <button onclick="showTab('security')" id="tab-security">Security</button>
+      <button onclick="showTab('dns')" id="tab-dns">DNS Sinkhole</button>
+      <button onclick="showTab('threats')" id="tab-threats">Threat Intel</button>
       <button onclick="showTab('rules')" id="tab-rules">Rules</button>
       <button onclick="showTab('digest')" id="tab-digest">Weekly Digest</button>
     </nav>
     <button class="btn-action" id="btn-scan" onclick="triggerNetworkScan()">
-      <span>📡</span> <span id="scan-text">Scan Network</span>
+      <span id="scan-text">Scan Network</span>
     </button>
   </div>
 </header>
@@ -144,7 +144,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
 <div id="toast" class="toast"></div>
 
 <div id="anomaly-banner" class="anomaly-banner" onclick="toggleAnomalyList()">
-  <h3>🔴 <span id="anomaly-count">0</span> Active Anomalies</h3>
+  <h3><span id="anomaly-count">0</span> Active Anomalies</h3>
   <div class="anomaly-list" id="anomaly-list"></div>
 </div>
 
@@ -154,7 +154,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
     <div class="stat-card"><div class="stat-label">Monitored Devices</div><div class="stat-value" id="stat-devices">—</div></div>
     <div class="stat-card"><div class="stat-label">Uploaded Today</div><div class="stat-value accent" id="stat-upload">—</div></div>
     <div class="stat-card"><div class="stat-label">Active Anomalies</div><div class="stat-value" id="stat-anomalies">—</div></div>
-    <div class="stat-card"><div class="stat-label">ARP Spoof Guard</div><div class="stat-value green" style="font-size:1.1rem">ACTIVE 🛡️</div></div>
+    <div class="stat-card"><div class="stat-label">ARP Spoof Guard</div><div class="stat-value green" style="font-size:1.1rem">ACTIVE</div></div>
   </div>
 
   <div class="table-section">
@@ -176,23 +176,23 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
   <div class="detail-panel" id="detail-panel">
     <div class="detail-grid">
       <div class="detail-section">
-        <h3>📊 24h Traffic</h3>
+        <h3>24h Traffic</h3>
         <canvas class="sparkline-canvas" id="sparkline" width="400" height="80"></canvas>
       </div>
       <div class="detail-section">
-        <h3>🔍 Device Profile</h3>
+        <h3>Device Profile</h3>
         <p id="profile-info">Loading...</p>
       </div>
       <div class="detail-section">
-        <h3>🛡️ Open Ports & Vulnerabilities</h3>
+        <h3>Open Ports & Vulnerabilities</h3>
         <div id="device-ports-list"><p style="color:var(--text-muted);font-size:.85rem">Scanning...</p></div>
       </div>
       <div class="detail-section">
-        <h3>🌍 Known Destinations</h3>
+        <h3>Known Destinations</h3>
         <ul class="dest-list" id="dest-list"></ul>
       </div>
       <div class="detail-section" style="grid-column: 1 / -1">
-        <h3>🚨 Isolation & Active Defense</h3>
+        <h3>Isolation & Active Defense</h3>
         <div id="detail-quarantine-box"></div>
       </div>
     </div>
@@ -233,7 +233,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
   <div class="table-section">
     <div class="table-header-row">
       <h2>Live DNS Threat Log & Query Stream</h2>
-      <button class="btn-secondary" id="btn-sync-dns" onclick="syncDnsBlocklists()">🔄 Sync Blocklists</button>
+      <button class="btn-secondary" id="btn-sync-dns" onclick="syncDnsBlocklists()">Sync Blocklists</button>
     </div>
     <table class="device-table">
       <thead><tr>
@@ -249,13 +249,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
   <div class="stats">
     <div class="stat-card"><div class="stat-label">Tracked Malicious IPs</div><div class="stat-value red" id="cti-total-ips">—</div></div>
     <div class="stat-card"><div class="stat-label">Active Threat Feeds</div><div class="stat-value accent" id="cti-feeds-count">—</div></div>
-    <div class="stat-card"><div class="stat-label">Live C2 Traffic Guard</div><div class="stat-value green" style="font-size:1.1rem">ARMED ⚡</div></div>
+    <div class="stat-card"><div class="stat-label">Live C2 Traffic Guard</div><div class="stat-value green" style="font-size:1.1rem">ARMED</div></div>
   </div>
 
   <div class="table-section">
     <div class="table-header-row">
       <h2>Cyber Threat Intelligence (CTI) Nodes</h2>
-      <button class="btn-secondary" id="btn-sync-cti" onclick="syncThreatFeeds()">🔄 Sync Threat Feeds Now</button>
+      <button class="btn-secondary" id="btn-sync-cti" onclick="syncThreatFeeds()">Sync Threat Feeds Now</button>
     </div>
     <table class="device-table">
       <thead><tr>
@@ -400,7 +400,7 @@ async function fetchDevices() {
 
       let portBadge = '<span style="color:var(--text-muted)">—</span>';
       if (d.has_insecure_ports) {
-        portBadge = '<span class="badge badge-danger">⚠️ Insecure Port</span>';
+        portBadge = '<span class="badge badge-danger">Insecure Port</span>';
       } else if (d.open_ports && d.open_ports.length > 0) {
         portBadge = `<span class="badge badge-blue">${d.open_ports.length} Open</span>`;
       }
@@ -438,7 +438,7 @@ async function fetchAnomalies() {
     banner.className = anomalies.length > 0 ? 'anomaly-banner visible' : 'anomaly-banner';
     list.innerHTML = anomalies.map(a => {
       const isZeroDay = a.kind === 'CanaryTripDetected' || a.kind === 'DgaDomainDetected' || a.kind === 'DnsTunnelingExfiltration';
-      const badge = isZeroDay ? '<span style="background:#dc2626;color:#fff;font-size:0.65rem;padding:2px 6px;border-radius:4px;font-weight:700;margin-right:6px">⚡ ZERO-DAY DEFENSE</span>' : '';
+      const badge = isZeroDay ? '<span style="background:#dc2626;color:#fff;font-size:0.65rem;padding:2px 6px;border-radius:4px;font-weight:700;margin-right:6px">ZERO-DAY DEFENSE</span>' : '';
       return `
       <div class="anomaly-item">
         <div>${badge}<span class="kind">${esc(a.kind)}</span> — ${esc(a.detail)}<br>
@@ -471,7 +471,7 @@ async function toggleDetail(mac) {
     const info = document.getElementById('profile-info');
     if (r.ok) {
       const p = await r.json();
-      info.innerHTML = `<strong>Status:</strong> ${p.observation_hours >= 72 ? '✅ Mature Profile' : `⏳ Baseline building (${p.observation_hours}/72h)`}<br>
+      info.innerHTML = `<strong>Status:</strong> ${p.observation_hours >= 72 ? 'Mature Profile' : `Baseline building (${p.observation_hours}/72h)`}<br>
         <strong>Expected Hourly Mean:</strong> ${humanBytes(p.baseline_bytes_sent_per_hour_mean)}/hr<br>
         <strong>Active Hours:</strong> ${p.active_hours.join(', ') || 'N/A'}`;
     } else { info.textContent = 'Profiling in progress (needs 72h observation).'; }
@@ -497,8 +497,8 @@ async function toggleDetail(mac) {
   const encodedDetailMac = encodeURIComponent(mac);
   const qBox = document.getElementById('detail-quarantine-box');
   qBox.innerHTML = `
-    <button class="btn-action" style="background:#dc2626" onclick="toggleQuarantine(decodeURIComponent('${encodedDetailMac}'), true)">🚫 Isolate / Quarantine Device</button>
-    <button class="btn-secondary" style="margin-left:.75rem" onclick="toggleQuarantine(decodeURIComponent('${encodedDetailMac}'), false)">✅ Release Quarantine</button>
+    <button class="btn-action" style="background:#dc2626" onclick="toggleQuarantine(decodeURIComponent('${encodedDetailMac}'), true)">Isolate / Quarantine Device</button>
+    <button class="btn-secondary" style="margin-left:.75rem" onclick="toggleQuarantine(decodeURIComponent('${encodedDetailMac}'), false)">Release Quarantine</button>
   `;
 }
 
@@ -513,7 +513,7 @@ async function loadSecurity() {
 
     const tbody = document.getElementById('sec-ports-tbody');
     if (s.insecure_ports.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--green);text-align:center;padding:2rem">🛡️ No high-risk or insecure ports detected across the network.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--green);text-align:center;padding:2rem">No high-risk or insecure ports detected across the network.</td></tr>';
     } else {
       tbody.innerHTML = s.insecure_ports.map(p => `
         <tr>
@@ -548,7 +548,7 @@ async function loadDns() {
           <td><span class="mac">${esc(q.client_ip)}</span></td>
           <td><strong>${esc(q.domain)}</strong></td>
           <td><span class="badge badge-blue">${esc(q.query_type)}</span></td>
-          <td>${q.is_blocked ? '<span class="badge badge-danger">🛑 BLOCKED</span>' : '<span class="badge badge-success">✅ RESOLVED</span>'}</td>
+          <td>${q.is_blocked ? '<span class="badge badge-danger">BLOCKED</span>' : '<span class="badge badge-success">RESOLVED</span>'}</td>
         </tr>`).join('');
     }
   } catch(e) {}
@@ -568,7 +568,7 @@ async function syncDnsBlocklists() {
     showToast('Failed to sync DNS blocklists');
   } finally {
     btn.disabled = false;
-    btn.textContent = '🔄 Sync Blocklists';
+    btn.textContent = 'Sync Blocklists';
   }
 }
 
@@ -609,7 +609,7 @@ async function syncThreatFeeds() {
     showToast('Failed to sync threat feeds');
   } finally {
     btn.disabled = false;
-    btn.textContent = '🔄 Sync Threat Feeds Now';
+    btn.textContent = 'Sync Threat Feeds Now';
   }
 }
 
@@ -639,13 +639,13 @@ async function loadDigest() {
     const el = document.getElementById('digest-content');
     el.innerHTML = `
       <div class="card">
-        <h3>📅 Weekly Summary</h3>
+        <h3>Weekly Summary</h3>
         <p style="color:var(--text-muted);font-size:.85rem">${new Date(d.period_start).toLocaleDateString()} — ${new Date(d.period_end).toLocaleDateString()}</p>
         <p style="margin-top:.5rem">${d.total_anomalies} anomalies detected · Most active: ${esc(d.most_active_device || 'N/A')}</p>
       </div>
-      ${d.highlights.length ? '<div class="card"><h3>💡 Highlights</h3>' + d.highlights.map(h => `<div class="highlight">${esc(h)}</div>`).join('') + '</div>' : ''}
-      ${d.new_devices_seen.length ? '<div class="card"><h3>🆕 New Devices Discovered</h3>' + d.new_devices_seen.map(dev => `<div class="highlight">${esc(dev.label || dev.mac)} — ${esc(dev.vendor || 'Unknown vendor')} (${esc(dev.ip)})</div>`).join('') + '</div>' : ''}
-      ${d.top_destinations_by_country.length ? '<div class="card"><h3>🌍 Top Outbound Countries</h3>' + d.top_destinations_by_country.map(([c, b]) => `<div class="highlight">${esc(c)} — ${humanBytes(b)}</div>`).join('') + '</div>' : ''}`;
+      ${d.highlights.length ? '<div class="card"><h3>Highlights</h3>' + d.highlights.map(h => `<div class="highlight">${esc(h)}</div>`).join('') + '</div>' : ''}
+      ${d.new_devices_seen.length ? '<div class="card"><h3>New Devices Discovered</h3>' + d.new_devices_seen.map(dev => `<div class="highlight">${esc(dev.label || dev.mac)} — ${esc(dev.vendor || 'Unknown vendor')} (${esc(dev.ip)})</div>`).join('') + '</div>' : ''}
+      ${d.top_destinations_by_country.length ? '<div class="card"><h3>Top Outbound Countries</h3>' + d.top_destinations_by_country.map(([c, b]) => `<div class="highlight">${esc(c)} — ${humanBytes(b)}</div>`).join('') + '</div>' : ''}`;
   } catch(e) { document.getElementById('digest-content').innerHTML = '<p style="color:var(--text-muted);padding:2rem">No digest data available yet.</p>'; }
 }
 

@@ -220,6 +220,97 @@ pub async fn security_overview(State(state): State<AppState>) -> impl IntoRespon
     })
 }
 
+/// AI Security Analyst & Swarm status.
+#[derive(Serialize)]
+pub struct AiStatusResponse {
+    pub enabled: bool,
+    pub swarm_enabled: bool,
+    pub endpoint: String,
+    pub model: String,
+    pub timeout_seconds: u64,
+    pub autonomous_action: bool,
+    pub confidence_threshold: f64,
+    pub protected_macs: Vec<String>,
+}
+
+/// GET /api/ai/status
+pub async fn ai_status(State(state): State<AppState>) -> impl IntoResponse {
+    Json(AiStatusResponse {
+        enabled: state.config.ai_analyst.enabled,
+        swarm_enabled: state.config.ai_analyst.enable_agent_swarm,
+        endpoint: state.config.ai_analyst.endpoint.clone(),
+        model: state.config.ai_analyst.model.clone(),
+        timeout_seconds: state.config.ai_analyst.timeout_seconds,
+        autonomous_action: state.config.ai_analyst.autonomous_action,
+        confidence_threshold: state.config.ai_analyst.confidence_threshold,
+        protected_macs: state.config.ai_analyst.protected_macs.clone(),
+    })
+}
+
+/// POST /api/ai/investigate/:mac — Trigger on-demand AI Defensive Swarm investigation on a device.
+pub async fn ai_investigate_device(
+    Path(mac): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let dev_opt = state.store.get_device(&mac).unwrap_or(None);
+    if dev_opt.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Device {} not found in inventory", mac) })),
+        )
+            .into_response();
+    }
+    let dev = dev_opt.unwrap();
+    let anomalies = state.store.get_anomalies_for_device(&mac).unwrap_or_default();
+    let open_ports = state.store.get_ports_for_device(&mac).unwrap_or_default();
+
+    let port_summary = open_ports
+        .iter()
+        .map(|p| format!("{}/{}", p.port, p.service))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let detail = format!(
+        "On-demand inspection requested. IP: {}, Discovered open ports: [{}], Unresolved anomalies: {}",
+        dev.ip,
+        if port_summary.is_empty() { "None".to_string() } else { port_summary },
+        anomalies.len()
+    );
+
+    let synthetic_anomaly = hearth_core::types::Anomaly {
+        id: None,
+        mac: mac.clone(),
+        detected_at: chrono::Utc::now(),
+        kind: hearth_core::types::AnomalyKind::CanaryTripDetected,
+        detail,
+        resolved: false,
+    };
+
+    let analyst = hearth_core::ai_analyst::AiAnalyst::new(state.config.ai_analyst.clone());
+    match analyst.evaluate_incident(&synthetic_anomaly, dev.label.as_deref(), None).await {
+        Ok(decision) => {
+            let guardrail_eval = analyst.validate_guardrails(&mac, &decision, false);
+            Json(serde_json::json!({
+                "mac": mac,
+                "label": dev.label,
+                "decision": decision,
+                "guardrails": {
+                    "allowed_to_quarantine": guardrail_eval.allowed_to_quarantine,
+                    "veto_reason": guardrail_eval.veto_reason
+                }
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": format!("AI Analyst investigation failed: {}", e)
+            })),
+        )
+            .into_response(),
+    }
+}
+
 /// POST /api/scan
 pub async fn trigger_scan(State(state): State<AppState>) -> impl IntoResponse {
     let oui_db = std::sync::Arc::new(hearth_core::oui::OuiDb::load(&state.config.oui_db_path));

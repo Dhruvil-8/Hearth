@@ -77,8 +77,8 @@ pub fn check_zero_day_heuristics(domain: &str) -> DnsHeuristicResult {
         return DnsHeuristicResult::Clean;
     }
 
-    // 1. Check for DNS Tunneling: excessive label length (>= 45 chars) or excessive overall query length (>= 150 chars)
-    if clean.len() >= 150 {
+    // 1. Check for DNS Tunneling: excessive label length (>= 35 chars) or excessive overall query length (>= 110 chars)
+    if clean.len() >= 110 {
         return DnsHeuristicResult::DnsTunneling {
             label_len: clean.len(),
             detail: format!(
@@ -89,7 +89,7 @@ pub fn check_zero_day_heuristics(domain: &str) -> DnsHeuristicResult {
     }
 
     for label in &labels {
-        if label.len() >= 45 {
+        if label.len() >= 35 {
             return DnsHeuristicResult::DnsTunneling {
                 label_len: label.len(),
                 detail: format!(
@@ -102,28 +102,45 @@ pub fn check_zero_day_heuristics(domain: &str) -> DnsHeuristicResult {
 
     // 2. Check for Algorithmic DGA (Domain Generation Algorithm):
     // Examine the second-level domain (SLD) or deepest non-subdomain label.
-    let candidate_sld = if labels.len() >= 2 {
-        labels[labels.len() - 2]
+    // Accurately resolve multi-part ccTLDs (e.g. .co.uk, .com.au, .org.uk, .co.jp, etc.)
+    let candidate_sld = if labels.len() >= 3 {
+        let tld = labels[labels.len() - 1];
+        let second = labels[labels.len() - 2];
+        if tld.len() == 2 && matches!(second, "co" | "com" | "org" | "net" | "gov" | "edu" | "ac" | "ne") {
+            labels[labels.len() - 3]
+        } else {
+            labels[labels.len() - 2]
+        }
+    } else if labels.len() == 2 {
+        labels[0]
     } else {
         labels[0]
     };
 
-    if candidate_sld.len() >= 12 {
-        let entropy = calculate_shannon_entropy(candidate_sld);
-        let vowels = candidate_sld
+    // Check candidate SLD, or any label with length >= 12
+    let mut labels_to_check = vec![candidate_sld];
+    for &label in &labels {
+        if label.len() >= 12 && !labels_to_check.contains(&label) {
+            labels_to_check.push(label);
+        }
+    }
+
+    for label in labels_to_check {
+        let entropy = calculate_shannon_entropy(label);
+        let vowels = label
             .chars()
             .filter(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u'))
             .count();
-        let vowel_ratio = vowels as f64 / candidate_sld.len() as f64;
+        let vowel_ratio = vowels as f64 / label.len() as f64;
 
         // DGA patterns:
         // High entropy (>= 3.65) with low vowel ratio (< 0.20) or very high entropy (>= 3.85)
-        if (entropy >= 3.65 && vowel_ratio < 0.20) || (entropy >= 3.85 && candidate_sld.len() >= 14) {
+        if (entropy >= 3.65 && vowel_ratio < 0.20) || (entropy >= 3.85 && label.len() >= 14) {
             return DnsHeuristicResult::DgaDomain {
                 entropy,
                 detail: format!(
-                    "SLD label '{}' exhibits high Shannon entropy ({:.2}) and low vowel ratio ({:.2}), matching DGA botnet beaconing",
-                    candidate_sld, entropy, vowel_ratio
+                    "Label '{}' exhibits high Shannon entropy ({:.2}) and low vowel ratio ({:.2}), matching DGA botnet beaconing",
+                    label, entropy, vowel_ratio
                 ),
             };
         }
@@ -142,6 +159,8 @@ pub struct DnsSinkhole {
     ip_to_domain: Arc<RwLock<std::collections::HashMap<IpAddr, String>>>,
     /// HTTP client for encrypted DNS-over-HTTPS (DoH) queries
     http_client: reqwest::Client,
+    /// Bounded semaphore for concurrent upstream UDP queries to prevent socket/file descriptor exhaustion
+    upstream_semaphore: Arc<tokio::sync::Semaphore>,
     /// Optional channel to broadcast detected zero-day security anomalies
     anomaly_tx: Option<tokio::sync::mpsc::Sender<Anomaly>>,
 }
@@ -159,6 +178,7 @@ impl DnsSinkhole {
             memory_blocklist: Arc::new(RwLock::new(HashSet::new())),
             ip_to_domain: Arc::new(RwLock::new(std::collections::HashMap::new())),
             http_client,
+            upstream_semaphore: Arc::new(tokio::sync::Semaphore::new(128)),
             anomaly_tx: None,
         }
     }
@@ -304,7 +324,7 @@ impl DnsSinkhole {
         let bind_addr = format!("0.0.0.0:{}", self.config.port);
         let socket = match UdpSocket::bind(&bind_addr).await {
             Ok(s) => {
-                info!("🛡️ DNS Threat Sinkhole listening on UDP {}", bind_addr);
+                info!("[DNS-SINKHOLE] Threat Sinkhole listening on UDP {}", bind_addr);
                 s
             }
             Err(e) => {
@@ -381,7 +401,7 @@ impl DnsSinkhole {
         // Reject non-private/WAN DNS queries without responding to prevent DDoS amplification abuse.
         if !Self::is_trusted_dns_client(&client_addr.ip()) {
             warn!(
-                "🛑 Dropped DNS query from non-private client {} (anti-amplification protection)",
+                "[DNS-DROP] Dropped DNS query from non-private client {} (anti-amplification protection)",
                 client_addr.ip()
             );
             return Ok(());
@@ -405,7 +425,7 @@ impl DnsSinkhole {
                 DnsHeuristicResult::DgaDomain { entropy, detail } => {
                     is_blocked = true;
                     block_reason = Some(format!("Zero-Day DGA Heuristic (Entropy {:.2}): {}", entropy, detail));
-                    warn!("🚨 [ZERO-DAY DGA DETECTED] Sinkholed algorithmic domain '{}' from client {}: {}", domain, client_addr.ip(), detail);
+                    warn!("[ZERO-DAY DGA DETECTED] Sinkholed algorithmic domain '{}' from client {}: {}", domain, client_addr.ip(), detail);
 
                     if let Some(ref tx) = self.anomaly_tx {
                         let anomaly = Anomaly {
@@ -422,7 +442,7 @@ impl DnsSinkhole {
                 DnsHeuristicResult::DnsTunneling { label_len, detail } => {
                     is_blocked = true;
                     block_reason = Some(format!("Zero-Day DNS Tunneling Heuristic (Label {} bytes): {}", label_len, detail));
-                    warn!("🚨 [ZERO-DAY DNS TUNNEL DETECTED] Sinkholed exfiltration query '{}' from client {}: {}", domain, client_addr.ip(), detail);
+                    warn!("[ZERO-DAY DNS TUNNEL DETECTED] Sinkholed exfiltration query '{}' from client {}: {}", domain, client_addr.ip(), detail);
 
                     if let Some(ref tx) = self.anomaly_tx {
                         let anomaly = Anomaly {
@@ -440,7 +460,7 @@ impl DnsSinkhole {
             }
         }
 
-        // Log DNS query
+        // Log DNS query asynchronously in a blocking worker thread to eliminate Tokio event-loop starvation
         let query_log = DnsQueryLog {
             id: None,
             timestamp: Utc::now(),
@@ -451,10 +471,13 @@ impl DnsSinkhole {
             is_blocked,
             block_reason,
         };
-        let _ = self.store.insert_dns_query(&query_log);
+        let store_clone = Arc::clone(&self.store);
+        tokio::task::spawn_blocking(move || {
+            let _ = store_clone.insert_dns_query(&query_log);
+        });
 
         if is_blocked {
-            info!("🛑 [DNS SINKHOLE] Blocked malicious domain '{}' from {}", domain, client_addr.ip());
+            info!("[DNS-SINKHOLE] Blocked malicious domain '{}' from {}", domain, client_addr.ip());
             let sinkhole_resp = Self::build_sinkhole_response(query);
             // Reply directly from port 53 using the server listener socket
             server_socket.send_to(&sinkhole_resp, client_addr).await?;
@@ -474,18 +497,21 @@ impl DnsSinkhole {
             }
 
             if resolved_data.is_none() {
-                // Forward to standard UDP upstream DNS resolver
-                let upstream_client = UdpSocket::bind("0.0.0.0:0").await?;
-                upstream_client.send_to(query, upstream_addr).await?;
-                let mut upstream_buf = [0u8; 1024];
+                // Forward to standard UDP upstream DNS resolver with bounded concurrency
+                if let Ok(_permit) = self.upstream_semaphore.acquire().await {
+                    if let Ok(upstream_client) = UdpSocket::bind("0.0.0.0:0").await {
+                        let _ = upstream_client.send_to(query, upstream_addr).await;
+                        let mut upstream_buf = [0u8; 1024];
 
-                if let Ok(Ok((resp_len, _))) = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    upstream_client.recv_from(&mut upstream_buf),
-                )
-                .await
-                {
-                    resolved_data = Some(upstream_buf[..resp_len].to_vec());
+                        if let Ok(Ok((resp_len, _))) = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            upstream_client.recv_from(&mut upstream_buf),
+                        )
+                        .await
+                        {
+                            resolved_data = Some(upstream_buf[..resp_len].to_vec());
+                        }
+                    }
                 }
             }
 
@@ -789,11 +815,19 @@ mod tests {
             other => panic!("Expected DgaDomain, got {:?}", other),
         }
 
-        // Subdomain DNS tunneling exfiltration (label length >= 45 chars)
-        let tunneling_domain = "aW5mbzEyMzQ1Njc4OTA1MTYyNzM4NDk1MDE5Mjg0NzI5Mzg0NzI5Mzg0NzI5.tunnel.evil.com";
+        // Algorithmic DGA domain with multi-part ccTLD (.co.uk)
+        match check_zero_day_heuristics("x89qzm3ak91lqwv7.co.uk") {
+            DnsHeuristicResult::DgaDomain { entropy, .. } => {
+                assert!(entropy >= 3.65);
+            }
+            other => panic!("Expected DgaDomain for .co.uk, got {:?}", other),
+        }
+
+        // Subdomain DNS tunneling exfiltration (label length >= 35 chars)
+        let tunneling_domain = "aW5mbzEyMzQ1Njc4OTA1MTYyNzM4NDk1MDE5Mjg.tunnel.evil.com";
         match check_zero_day_heuristics(tunneling_domain) {
             DnsHeuristicResult::DnsTunneling { label_len, .. } => {
-                assert!(label_len >= 45);
+                assert!(label_len >= 35);
             }
             other => panic!("Expected DnsTunneling, got {:?}", other),
         }

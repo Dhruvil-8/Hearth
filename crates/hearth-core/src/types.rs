@@ -187,6 +187,10 @@ pub struct Config {
     pub subnet: Option<String>,
     /// Optional API key for securing dashboard and API endpoints
     pub api_key: Option<String>,
+    /// Optional explicitly trusted gateway IP to prevent ARP/DHCP spoofing race conditions
+    pub gateway_ip: Option<String>,
+    /// Optional explicitly trusted gateway MAC to prevent ARP/DHCP spoofing race conditions
+    pub gateway_mac: Option<String>,
     /// Path to SQLite database file
     #[serde(default = "default_db_path")]
     pub db_path: String,
@@ -432,12 +436,54 @@ pub struct AiAnalystConfig {
     /// Whether the AI Analyst is authorized to take proactive quarantine actions within strict deterministic guardrails
     #[serde(default)]
     pub autonomous_action: bool,
+    /// Whether to deploy an autonomous multi-agent defense swarm (Threat Hunter, Forensics Auditor, Containment Commander)
+    #[serde(default = "default_true")]
+    pub enable_agent_swarm: bool,
     /// Minimum confidence threshold (0.0 to 1.0) required to trigger proactive quarantine (default 0.85)
     #[serde(default = "default_ai_confidence_threshold")]
     pub confidence_threshold: f64,
     /// Static list of MAC addresses the AI is strictly forbidden from ever isolating (e.g. admin laptops, servers)
     #[serde(default)]
     pub protected_macs: Vec<String>,
+    /// Fine-grained permission rules set by the user defining the AI's operational authority
+    #[serde(default)]
+    pub permissions: AiPermissionsConfig,
+}
+
+/// User-configurable permission rules defining the exact operational authority of the AI Agent / Swarm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiPermissionsConfig {
+    /// Allow the AI to apply hardware firewall isolation on compromised devices
+    #[serde(default = "default_true")]
+    pub allow_quarantine: bool,
+    /// Allow the AI to dynamically sinkhole zero-day C2 domains in the DNS proxy
+    #[serde(default = "default_true")]
+    pub allow_dns_sinkhole: bool,
+    /// Allow the AI to trigger active network discovery and port security scans
+    #[serde(default = "default_true")]
+    pub allow_network_scans: bool,
+    /// Allow the AI to mark false-positive or mitigated anomalies as resolved
+    #[serde(default = "default_true")]
+    pub allow_resolve_anomalies: bool,
+    /// Maximum proactive defensive actions allowed per 1-hour window (anti-runaway circuit breaker)
+    #[serde(default = "default_max_actions_per_hour")]
+    pub max_actions_per_hour: u32,
+}
+
+impl Default for AiPermissionsConfig {
+    fn default() -> Self {
+        Self {
+            allow_quarantine: true,
+            allow_dns_sinkhole: true,
+            allow_network_scans: true,
+            allow_resolve_anomalies: true,
+            max_actions_per_hour: 20,
+        }
+    }
+}
+
+fn default_max_actions_per_hour() -> u32 {
+    20
 }
 
 impl Default for AiAnalystConfig {
@@ -449,8 +495,10 @@ impl Default for AiAnalystConfig {
             api_key: None,
             timeout_seconds: default_ai_timeout(),
             autonomous_action: false,
+            enable_agent_swarm: true,
             confidence_threshold: default_ai_confidence_threshold(),
             protected_macs: Vec::new(),
+            permissions: Default::default(),
         }
     }
 }

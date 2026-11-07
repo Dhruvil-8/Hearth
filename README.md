@@ -119,6 +119,39 @@ cargo build --release --workspace
 
 ---
 
+## 24/7/365 Autonomous Defense & Human-in-the-Loop Control
+
+Hearth is engineered to run continuously 24/7/365 as a background daemon (via systemd, Windows Service, or Docker), providing autonomous defense against AI attacker swarms while guaranteeing **human administrators have absolute override control at any second**:
+
+### 1. Autonomous Defensive Swarm (`autonomous_action = true`)
+* **Continuous Monitoring**: Hearth's microsecond Rust reflex layer monitors every packet 24/7 without token or cloud costs.
+* **Coordinated Counter-Swarm**: When high-severity attacks occur (WannaCry-style lateral worming, DGA C2 beaconing, DNS exfiltration), Hearth spawns a parallel defensive swarm:
+  * **Threat Hunter Agent**: Identifies adversary attribution and C2 framework signatures.
+  * **Forensics Auditor Agent**: Maps packet telemetry directly to MITRE ATT&CK enterprise techniques.
+  * **Containment Commander Agent**: Formulates immediate isolation strategies to protect the rest of the LAN.
+* **Proactive Defense**: The swarm autonomously commands `nftables` hardware drops to quarantine attacking hosts and sinkholes C2 domains to `0.0.0.0` within milliseconds.
+
+### 2. Immediate Human-in-the-Loop Override
+The human operator can take back control or override the system at any moment:
+* **One-Click Web Dashboard**: Click "Quarantine" or "Unquarantine" on any device row in the web interface (`http://localhost:7777`).
+* **Instant CLI Commands**:
+  ```bash
+  hearth-cli quarantine <MAC>     # Immediately isolate an attacker
+  hearth-cli unquarantine <MAC>   # Instantly restore network access
+  hearth-cli status               # Check live network health
+  hearth-cli security             # View active threats and open ports
+  ```
+* **Advisory Mode Option**: In `hearth.toml`, set `autonomous_action = false` if you prefer the AI swarm to generate forensic investigation reports and alerts while waiting for human authorization before taking physical quarantine actions.
+
+### 3. AI Agent Tooling (REST API & CLI)
+Both human administrators and local/remote LLM agents can query Hearth as an active security tool via authenticated JSON endpoints:
+* `GET /api/summary` & `GET /api/security` — Health overview, vulnerability status, and anomaly tallies.
+* `GET /api/devices` & `GET /api/devices/:mac/ports` — Live device inventory and discovered open ports.
+* `GET /api/dns/stats` & `GET /api/dns/queries` — Real-time DNS sinkhole metrics and blocked domain telemetry.
+* `POST /api/devices/:mac/quarantine` — Execute or reverse containment actions programmatically.
+
+---
+
 ## Configuration (`config/hearth.toml`)
 
 ```toml

@@ -20,18 +20,38 @@ pub struct AppState {
     pub config: Config,
 }
 
-/// Constant-time string equality comparison to prevent timing side-channel attacks.
+/// Constant-time string equality comparison using fixed-length MD5 digests to prevent timing and length side-channel attacks.
 fn constant_time_compare(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    if a_bytes.len() != b_bytes.len() {
-        return false;
-    }
+    let hash_a = hearth_core::ja3::md5_hex(a.as_bytes());
+    let hash_b = hearth_core::ja3::md5_hex(b.as_bytes());
     let mut diff = 0u8;
-    for (&x, &y) in a_bytes.iter().zip(b_bytes.iter()) {
+    for (x, y) in hash_a.bytes().zip(hash_b.bytes()) {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Security headers middleware enforcing defense-in-depth on all HTTP responses.
+async fn security_headers_middleware(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static("x-xss-protection"),
+        axum::http::HeaderValue::from_static("1; mode=block"),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static("content-security-policy"),
+        axum::http::HeaderValue::from_static("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';"),
+    );
+    response
 }
 
 /// Authentication middleware enforcing API key for API endpoints.
@@ -40,37 +60,46 @@ async fn require_api_key(
     request: Request,
     next: Next,
 ) -> Response {
-    if let Some(ref expected_key) = state.config.api_key {
-        if !expected_key.is_empty() {
-            let headers = request.headers();
-            let auth_header = headers
-                .get("x-api-key")
-                .or_else(|| headers.get("authorization"))
-                .and_then(|h| h.to_str().ok());
+    let expected_key = match state.config.api_key {
+        Some(ref k) if !k.is_empty() => k.as_str(),
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "Unauthorized: Hearth API authentication is required. Configure 'api_key' in hearth.toml or set HEARTH_API_KEY."
+                })),
+            )
+                .into_response();
+        }
+    };
 
-            let is_authorized = match auth_header {
-                Some(header_val) => {
-                    if constant_time_compare(header_val, expected_key) {
-                        true
-                    } else if let Some(token) = header_val.strip_prefix("Bearer ") {
-                        constant_time_compare(token.trim(), expected_key)
-                    } else {
-                        false
-                    }
-                }
-                None => false,
-            };
+    let headers = request.headers();
+    let auth_header = headers
+        .get("x-api-key")
+        .or_else(|| headers.get("authorization"))
+        .and_then(|h| h.to_str().ok());
 
-            if !is_authorized {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({
-                        "error": "Unauthorized: Missing or invalid API key. Supply X-API-Key or Bearer token."
-                    })),
-                )
-                    .into_response();
+    let is_authorized = match auth_header {
+        Some(header_val) => {
+            if constant_time_compare(header_val, expected_key) {
+                true
+            } else if let Some(token) = header_val.strip_prefix("Bearer ") {
+                constant_time_compare(token.trim(), expected_key)
+            } else {
+                false
             }
         }
+        None => false,
+    };
+
+    if !is_authorized {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Unauthorized: Missing or invalid API key. Supply X-API-Key or Bearer token."
+            })),
+        )
+            .into_response();
     }
 
     next.run(request).await
@@ -126,11 +155,14 @@ pub async fn serve(port: u16, store: Arc<Store>, config: Config) -> anyhow::Resu
         .route("/threat-intel", get(handlers::threat_intel))
         .route("/dns/stats", get(handlers::dns_stats))
         .route("/dns/queries", get(handlers::dns_queries))
+        .route("/ai/status", get(handlers::ai_status))
+        .route("/ai/investigate/:mac", post(handlers::ai_investigate_device))
         .layer(middleware::from_fn_with_state(state.clone(), require_api_key));
 
     let app = Router::new()
         .route("/", get(handlers::index))
         .nest("/api", api_routes)
+        .layer(middleware::from_fn(security_headers_middleware))
         .layer(cors)
         .with_state(state);
 

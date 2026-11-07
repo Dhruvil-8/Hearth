@@ -50,6 +50,9 @@ pub fn start_capture(
     interface_name: &str,
     tx: mpsc::Sender<Vec<DeviceSnapshot>>,
     anomaly_tx: Option<mpsc::Sender<Anomaly>>,
+    canary_engine: Option<std::sync::Arc<crate::canary::CanaryEngine>>,
+    ra_guard: Option<std::sync::Arc<crate::ra_guard::RaGuard>>,
+    dhcp_guard: Option<std::sync::Arc<crate::dhcp_guard::DhcpGuard>>,
 ) -> anyhow::Result<()> {
     let interfaces = datalink::interfaces();
     let interface = interfaces
@@ -100,7 +103,7 @@ pub fn start_capture(
     let window_duration = Duration::from_secs(60);
     let mut window_start = Instant::now();
     let mut devices: HashMap<String, DeviceAccum> = HashMap::new();
-    let canary_engine = crate::canary::CanaryEngine::new();
+    let canary_engine = canary_engine.unwrap_or_else(|| std::sync::Arc::new(crate::canary::CanaryEngine::new()));
 
     loop {
         match rx.next() {
@@ -150,7 +153,9 @@ pub fn start_capture(
                                             if (udp.get_source() == 67 || udp.get_destination() == 68)
                                                 && udp.payload().len() >= 240
                                             {
-                                                if let Some(info) = crate::dhcp_guard::DhcpGuard::parse_dhcp_payload(udp.payload()) {
+                                                if let Some(ref dg) = dhcp_guard {
+                                                    let _ = dg.inspect_dhcp(IpAddr::V4(ipv4.get_source()), &src_mac, udp.payload());
+                                                } else if let Some(info) = crate::dhcp_guard::DhcpGuard::parse_dhcp_payload(udp.payload()) {
                                                     if info.op == 2 || info.message_type == Some(2) || info.message_type == Some(5) {
                                                         if let Some(rogue_router) = info.router_ip {
                                                             if rogue_router != IpAddr::V4(ipv4.get_source()) {
@@ -196,7 +201,9 @@ pub fn start_capture(
                                             }
                                         }
                                     } else if ipv6.get_next_header() == IpNextHeaderProtocols::Icmpv6 {
-                                        if let Some(ra_info) = crate::ra_guard::RaGuard::parse_router_advert(ipv6.payload()) {
+                                        if let Some(ref rag) = ra_guard {
+                                            let _ = rag.inspect_icmpv6(&src_mac, IpAddr::V6(ipv6.get_source()), ipv6.payload());
+                                        } else if let Some(ra_info) = crate::ra_guard::RaGuard::parse_router_advert(ipv6.payload()) {
                                             if ra_info.router_lifetime_secs > 0 {
                                                 tracing::info!("Observed active IPv6 Router Advertisement from MAC {} (prefixes: {:?})", src_mac, ra_info.prefixes);
                                             }

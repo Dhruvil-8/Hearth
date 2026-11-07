@@ -151,20 +151,20 @@ impl AlertDispatcher {
 
         let label = device_label.unwrap_or(&anomaly.mac);
         let title = match anomaly.kind {
-            AnomalyKind::NewDevice => "⚠️ [Hearth] New Device Discovered",
-            AnomalyKind::InsecurePortOpen => "🛡️ [Hearth] Insecure Port / Vulnerability",
-            AnomalyKind::ExcessiveUpload => "🚨 [Hearth] Excessive Upload Spike",
-            AnomalyKind::NewDestination => "🌐 [Hearth] New External Destination",
-            AnomalyKind::UnusualHour => "🕒 [Hearth] Activity at Unusual Hours",
-            AnomalyKind::VoiceLeakSuspected => "🎙️ [Hearth] Audio Leak Suspected",
-            AnomalyKind::MaliciousDest => "🚨🚨 [Hearth CRITICAL] Malicious C2 Traffic Detected",
-            AnomalyKind::ArpSpoofing => "☠️ [Hearth CRITICAL] ARP Spoofing / MITM Attack Detected",
-            AnomalyKind::RogueDhcp => "☠️ [Hearth CRITICAL] Rogue DHCP Server / LAN Hijack Detected",
-            AnomalyKind::MaliciousTlsFingerprint => "🚨🚨 [Hearth CRITICAL] Malicious JA3 TLS Fingerprint (C2 Botnet)",
-            AnomalyKind::RogueIpv6Router => "☠️ [Hearth CRITICAL] Rogue IPv6 Router / SLAAC Hijack Detected",
-            AnomalyKind::DgaDomainDetected => "🚨🚨 [Hearth ZERO-DAY] Algorithmic DGA C2 Domain Detected",
-            AnomalyKind::DnsTunnelingExfiltration => "🚨🚨 [Hearth ZERO-DAY] DNS Tunneling Data Exfiltration Detected",
-            AnomalyKind::CanaryTripDetected => "☠️ [Hearth ZERO-DAY] LAN Lateral Movement Canary Trap Tripped",
+            AnomalyKind::NewDevice => "[Hearth INFO] New Device Discovered",
+            AnomalyKind::InsecurePortOpen => "[Hearth WARN] Insecure Port / Vulnerability",
+            AnomalyKind::ExcessiveUpload => "[Hearth WARN] Excessive Upload Spike",
+            AnomalyKind::NewDestination => "[Hearth INFO] New External Destination",
+            AnomalyKind::UnusualHour => "[Hearth INFO] Activity at Unusual Hours",
+            AnomalyKind::VoiceLeakSuspected => "[Hearth WARN] Audio Leak Suspected",
+            AnomalyKind::MaliciousDest => "[Hearth CRITICAL] Malicious C2 Traffic Detected",
+            AnomalyKind::ArpSpoofing => "[Hearth CRITICAL] ARP Spoofing / MITM Attack Detected",
+            AnomalyKind::RogueDhcp => "[Hearth CRITICAL] Rogue DHCP Server / LAN Hijack Detected",
+            AnomalyKind::MaliciousTlsFingerprint => "[Hearth CRITICAL] Malicious JA3 TLS Fingerprint (C2 Botnet)",
+            AnomalyKind::RogueIpv6Router => "[Hearth CRITICAL] Rogue IPv6 Router / SLAAC Hijack Detected",
+            AnomalyKind::DgaDomainDetected => "[Hearth ZERO-DAY] Algorithmic DGA C2 Domain Detected",
+            AnomalyKind::DnsTunnelingExfiltration => "[Hearth ZERO-DAY] DNS Tunneling Data Exfiltration Detected",
+            AnomalyKind::CanaryTripDetected => "[Hearth ZERO-DAY] LAN Lateral Movement Canary Trap Tripped",
         };
 
         // Determine color code for rich embeds (Discord format)

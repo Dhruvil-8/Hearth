@@ -209,7 +209,7 @@ pub fn inspect_tls_traffic(
     // Zero-Day Heuristic TLS Inspection
     if let Some(anomaly_reason) = evaluate_tls_stack_heuristics(&fp.raw) {
         let detail = format!(
-            "🚨 ZERO-DAY HEURISTIC: Anomalous TLS Client Hello from {} (IP: {}). Fingerprint MD5: {}. Reason: {}. Potential stealth C2 beaconing!",
+            "ZERO-DAY HEURISTIC: Anomalous TLS Client Hello from {} (IP: {}). Fingerprint MD5: {}. Reason: {}. Potential stealth C2 beaconing!",
             src_mac, src_ip, fp.hash, anomaly_reason
         );
 

@@ -13,7 +13,7 @@ pub struct DhcpGuard {
     store: Arc<Store>,
     anomaly_tx: Sender<Anomaly>,
     /// Authorized DHCP server IPs (e.g. gateway router)
-    authorized_servers: tokio::sync::Mutex<HashSet<IpAddr>>,
+    authorized_servers: std::sync::Mutex<HashSet<IpAddr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,15 +31,16 @@ impl DhcpGuard {
         Self {
             store,
             anomaly_tx,
-            authorized_servers: tokio::sync::Mutex::new(HashSet::new()),
+            authorized_servers: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
     /// Authorize a known DHCP server IP address.
-    pub async fn authorize_server(&self, ip: IpAddr) {
-        let mut set = self.authorized_servers.lock().await;
-        set.insert(ip);
-        info!("Authorized DHCP server: {}", ip);
+    pub fn authorize_server(&self, ip: IpAddr) {
+        if let Ok(mut set) = self.authorized_servers.lock() {
+            set.insert(ip);
+            info!("Authorized DHCP server: {}", ip);
+        }
     }
 
     /// Parse a raw BOOTP/DHCP payload (RFC 2131).
@@ -140,7 +141,7 @@ impl DhcpGuard {
 
     /// Inspect a DHCP packet received on the network.
     /// If an unauthorized DHCP server is detected offering leases, emits a RogueDhcp anomaly.
-    pub async fn inspect_dhcp(
+    pub fn inspect_dhcp(
         &self,
         sender_ip: IpAddr,
         sender_mac: &str,
@@ -162,7 +163,10 @@ impl DhcpGuard {
 
         let effective_server_ip = info.server_ip.unwrap_or(sender_ip);
 
-        let mut auth_servers = self.authorized_servers.lock().await;
+        let mut auth_servers = match self.authorized_servers.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
 
         // If no authorized server is known yet, assume the first seen responding server is the legitimate gateway
         if auth_servers.is_empty() {
@@ -210,7 +214,7 @@ impl DhcpGuard {
                 if let Ok(id) = self.store.insert_anomaly(&anomaly) {
                     let mut stored = anomaly.clone();
                     stored.id = Some(id);
-                    let _ = self.anomaly_tx.send(stored).await;
+                    let _ = self.anomaly_tx.try_send(stored);
                 }
             }
 

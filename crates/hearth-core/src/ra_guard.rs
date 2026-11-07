@@ -13,7 +13,7 @@ pub struct RaGuard {
     store: Arc<Store>,
     anomaly_tx: Sender<Anomaly>,
     /// Authorized IPv6 router MAC addresses
-    authorized_routers: tokio::sync::Mutex<HashSet<String>>,
+    authorized_routers: std::sync::Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,15 +31,16 @@ impl RaGuard {
         Self {
             store,
             anomaly_tx,
-            authorized_routers: tokio::sync::Mutex::new(HashSet::new()),
+            authorized_routers: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
     /// Authorize a known legitimate IPv6 router MAC.
-    pub async fn authorize_router(&self, mac: &str) {
-        let mut set = self.authorized_routers.lock().await;
-        set.insert(mac.to_uppercase());
-        info!("Authorized IPv6 default router: {}", mac);
+    pub fn authorize_router(&self, mac: &str) {
+        if let Ok(mut set) = self.authorized_routers.lock() {
+            set.insert(mac.to_uppercase());
+            info!("Authorized IPv6 default router: {}", mac);
+        }
     }
 
     /// Parse an ICMPv6 payload starting with Type (byte 0).
@@ -110,7 +111,7 @@ impl RaGuard {
     }
 
     /// Inspect an ICMPv6 packet received on the LAN.
-    pub async fn inspect_icmpv6(
+    pub fn inspect_icmpv6(
         &self,
         sender_mac: &str,
         sender_ip: IpAddr,
@@ -127,7 +128,10 @@ impl RaGuard {
         }
 
         let norm_mac = sender_mac.to_uppercase();
-        let mut auth = self.authorized_routers.lock().await;
+        let mut auth = match self.authorized_routers.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
 
         if auth.is_empty() {
             auth.insert(norm_mac.clone());
@@ -159,7 +163,7 @@ impl RaGuard {
                 if let Ok(id) = self.store.insert_anomaly(&anomaly) {
                     let mut stored = anomaly.clone();
                     stored.id = Some(id);
-                    let _ = self.anomaly_tx.send(stored).await;
+                    let _ = self.anomaly_tx.try_send(stored);
                 }
             }
 

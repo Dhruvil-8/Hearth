@@ -43,6 +43,20 @@ impl ArpGuard {
         }
     }
 
+    /// Explicitly configure a static known gateway IP and MAC to prevent bootstrapping race conditions.
+    pub async fn set_static_gateway(&self, ip: IpAddr, mac: &str) {
+        let mut gw_ip = self.gateway_ip.lock().await;
+        let mut gw_mac = self.gateway_mac.lock().await;
+        *gw_ip = Some(ip);
+        if !mac.is_empty() {
+            let normalized = mac.to_uppercase();
+            *gw_mac = Some(normalized.clone());
+            info!("Explicitly anchored trusted gateway: {} -> {}", ip, normalized);
+        } else {
+            info!("Explicitly anchored trusted gateway IP: {}", ip);
+        }
+    }
+
     /// Process a freshly parsed ARP table snapshot `(IP, MAC)` pairs.
     pub async fn inspect_arp_table(&self, arp_entries: &[(IpAddr, String)]) -> Result<Vec<Anomaly>> {
         let mut detected_anomalies = Vec::new();

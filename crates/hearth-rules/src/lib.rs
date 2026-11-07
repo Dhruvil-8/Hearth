@@ -114,13 +114,20 @@ impl RulesEngine {
 
         let mut nft_arg_lists: Vec<Vec<String>> = Vec::new();
 
-        // Always flush and reapply from scratch
+        // Always flush forward and input chains and reapply from scratch
         nft_arg_lists.push(vec![
             "flush".into(),
             "chain".into(),
             "inet".into(),
             "hearth".into(),
             "forward".into(),
+        ]);
+        nft_arg_lists.push(vec![
+            "flush".into(),
+            "chain".into(),
+            "inet".into(),
+            "hearth".into(),
+            "input".into(),
         ]);
 
         for action in actions {
@@ -132,12 +139,25 @@ impl RulesEngine {
 
             match &action.action {
                 ActionKind::BlockOutbound { destination: None } | ActionKind::Quarantine => {
+                    // Drop transit forwarding traffic
                     nft_arg_lists.push(vec![
                         "add".into(),
                         "rule".into(),
                         "inet".into(),
                         "hearth".into(),
                         "forward".into(),
+                        "ether".into(),
+                        "saddr".into(),
+                        action.mac.clone(),
+                        "drop".into(),
+                    ]);
+                    // Drop incoming packets destined to Hearth daemon / host
+                    nft_arg_lists.push(vec![
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        "hearth".into(),
+                        "input".into(),
                         "ether".into(),
                         "saddr".into(),
                         action.mac.clone(),
@@ -188,35 +208,44 @@ impl RulesEngine {
                         action.mac,
                         domains.len()
                     );
-                    // Allow DNS resolution (UDP & TCP 53) so device can query allowed domains
-                    nft_arg_lists.push(vec![
-                        "add".into(),
-                        "rule".into(),
-                        "inet".into(),
-                        "hearth".into(),
-                        "forward".into(),
-                        "ether".into(),
-                        "saddr".into(),
-                        action.mac.clone(),
-                        "udp".into(),
-                        "dport".into(),
-                        "53".into(),
-                        "accept".into(),
-                    ]);
-                    nft_arg_lists.push(vec![
-                        "add".into(),
-                        "rule".into(),
-                        "inet".into(),
-                        "hearth".into(),
-                        "forward".into(),
-                        "ether".into(),
-                        "saddr".into(),
-                        action.mac.clone(),
-                        "tcp".into(),
-                        "dport".into(),
-                        "53".into(),
-                        "accept".into(),
-                    ]);
+                    // Allow DNS resolution (UDP & TCP 53) ONLY to local private subnets (RFC 1918)
+                    // Prevents WAN egress tunneling over port 53 while allowing local DNS sinkhole
+                    for private_net in &["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
+                        nft_arg_lists.push(vec![
+                            "add".into(),
+                            "rule".into(),
+                            "inet".into(),
+                            "hearth".into(),
+                            "forward".into(),
+                            "ether".into(),
+                            "saddr".into(),
+                            action.mac.clone(),
+                            "ip".into(),
+                            "daddr".into(),
+                            (*private_net).into(),
+                            "udp".into(),
+                            "dport".into(),
+                            "53".into(),
+                            "accept".into(),
+                        ]);
+                        nft_arg_lists.push(vec![
+                            "add".into(),
+                            "rule".into(),
+                            "inet".into(),
+                            "hearth".into(),
+                            "forward".into(),
+                            "ether".into(),
+                            "saddr".into(),
+                            action.mac.clone(),
+                            "ip".into(),
+                            "daddr".into(),
+                            (*private_net).into(),
+                            "tcp".into(),
+                            "dport".into(),
+                            "53".into(),
+                            "accept".into(),
+                        ]);
+                    }
 
                     // Resolve domains to IPs and permit them
                     for domain in domains {
@@ -287,44 +316,56 @@ impl RulesEngine {
 
     /// Generate nftables commands as strings (for testing).
     pub fn generate_commands(&self, actions: &[RuleAction]) -> Vec<String> {
-        let mut commands = vec!["nft flush chain inet hearth forward".to_string()];
+        let mut commands = vec![
+            "nft flush chain inet hearth forward".to_string(),
+            "nft flush chain inet hearth input".to_string(),
+        ];
         for action in actions {
-            let cmd = match &action.action {
+            match &action.action {
                 ActionKind::BlockOutbound { destination: None } => {
-                    format!(
+                    commands.push(format!(
                         "nft add rule inet hearth forward ether saddr {} drop",
                         action.mac
-                    )
+                    ));
+                    commands.push(format!(
+                        "nft add rule inet hearth input ether saddr {} drop",
+                        action.mac
+                    ));
+                }
+                ActionKind::Quarantine => {
+                    commands.push(format!(
+                        "nft add rule inet hearth forward ether saddr {} drop",
+                        action.mac
+                    ));
+                    commands.push(format!(
+                        "nft add rule inet hearth input ether saddr {} drop",
+                        action.mac
+                    ));
                 }
                 ActionKind::BlockOutbound {
                     destination: Some(ip),
                 } => {
-                    format!(
+                    commands.push(format!(
                         "nft add rule inet hearth forward ether saddr {} ip daddr {} drop",
                         action.mac, ip
-                    )
+                    ));
                 }
                 ActionKind::RateLimit {
                     max_bytes_per_second,
                 } => {
-                    format!("nft add rule inet hearth forward ether saddr {} limit rate {} kbytes/second accept",
-                        action.mac, max_bytes_per_second / 1024)
-                }
-                ActionKind::Quarantine => {
-                    format!(
-                        "nft add rule inet hearth forward ether saddr {} drop",
-                        action.mac
-                    )
+                    commands.push(format!(
+                        "nft add rule inet hearth forward ether saddr {} limit rate {} kbytes/second accept",
+                        action.mac, max_bytes_per_second / 1024
+                    ));
                 }
                 ActionKind::AllowOnly { domains } => {
-                    format!(
+                    commands.push(format!(
                         "nft add rule inet hearth forward ether saddr {} drop # allow-only: {}",
                         action.mac,
                         domains.join(", ")
-                    )
+                    ));
                 }
-            };
-            commands.push(cmd);
+            }
         }
         commands
     }
@@ -334,7 +375,7 @@ impl RulesEngine {
         self.store.set_device_quarantine(mac, true)?;
         let actions = self.evaluate().await?;
         self.apply(&actions)?;
-        tracing::warn!("🛡️ Device {} has been QUARANTINED at the firewall", mac);
+        tracing::warn!("[QUARANTINE] Device {} has been isolated at the firewall", mac);
         Ok(())
     }
 
@@ -343,7 +384,7 @@ impl RulesEngine {
         self.store.set_device_quarantine(mac, false)?;
         let actions = self.evaluate().await?;
         self.apply(&actions)?;
-        tracing::info!("Device {} has been unquarantined", mac);
+        tracing::info!("[UNQUARANTINE] Device {} quarantine removed at firewall", mac);
         Ok(())
     }
 }
@@ -390,9 +431,10 @@ pub fn is_valid_mac(mac: &str) -> bool {
 pub fn init_nftables() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        let commands: [&[&str]; 2] = [
+        let commands: [&[&str]; 3] = [
             &["add", "table", "inet", "hearth"],
             &["add", "chain", "inet", "hearth", "forward", "{ type filter hook forward priority 0 ; }"],
+            &["add", "chain", "inet", "hearth", "input", "{ type filter hook input priority 0 ; }"],
         ];
         for args in &commands {
             tracing::info!("nftables init: nft {:?}", args);
@@ -443,6 +485,8 @@ mod tests {
             dashboard_port: 7777,
             subnet: None,
             api_key: None,
+            gateway_ip: None,
+            gateway_mac: None,
             db_path: ":memory:".into(),
             oui_db_path: "".into(),
             geoip_db_path: "".into(),
@@ -463,10 +507,11 @@ mod tests {
         }];
 
         let cmds = engine.generate_commands(&actions);
-        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds.len(), 4);
         assert!(cmds[0].contains("flush"));
-        assert!(cmds[1].contains("AA:BB:CC:DD:EE:FF"));
-        assert!(cmds[1].contains("drop"));
+        assert!(cmds[1].contains("flush"));
+        assert!(cmds[2].contains("AA:BB:CC:DD:EE:FF") && cmds[2].contains("forward"));
+        assert!(cmds[3].contains("AA:BB:CC:DD:EE:FF") && cmds[3].contains("input"));
     }
 
     #[test]
@@ -476,6 +521,8 @@ mod tests {
             dashboard_port: 7777,
             subnet: None,
             api_key: None,
+            gateway_ip: None,
+            gateway_mac: None,
             db_path: ":memory:".into(),
             oui_db_path: "".into(),
             geoip_db_path: "".into(),
@@ -496,9 +543,9 @@ mod tests {
         }];
 
         let cmds = engine.generate_commands(&actions);
-        assert_eq!(cmds.len(), 2);
-        assert!(cmds[1].contains("11:22:33:44:55:66"));
-        assert!(cmds[1].contains("drop"));
+        assert_eq!(cmds.len(), 4);
+        assert!(cmds[2].contains("11:22:33:44:55:66") && cmds[2].contains("forward"));
+        assert!(cmds[3].contains("11:22:33:44:55:66") && cmds[3].contains("input"));
     }
 
     #[test]

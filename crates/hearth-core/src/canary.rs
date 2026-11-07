@@ -50,6 +50,13 @@ impl CanaryEngine {
         }
     }
 
+    /// Register multiple dark / unassigned canary IP addresses on the local subnet.
+    pub fn register_canary_ips<I: IntoIterator<Item = IpAddr>>(&self, ips: I) {
+        if let Ok(mut set) = self.canary_ips.lock() {
+            set.extend(ips);
+        }
+    }
+
     /// Check if an IP address is registered as a deception canary.
     pub fn is_canary_ip(&self, ip: &IpAddr) -> bool {
         if let Ok(set) = self.canary_ips.lock() {
@@ -101,7 +108,7 @@ impl CanaryEngine {
 
         let detail = if is_canary_target {
             format!(
-                "☠️ CRITICAL: Zero-day lateral movement canary trap tripped! Host {} (IP: {}) contacted dark/unassigned honeypot IP: {} on port {}. Suspected internal worm scanning / network reconnaissance.",
+                "CRITICAL: Zero-day lateral movement canary trap tripped! Host {} (IP: {}) contacted dark/unassigned honeypot IP: {} on port {}. Suspected internal worm scanning / network reconnaissance.",
                 src_mac, src_ip, dst_ip, dst_port
             )
         } else {
@@ -114,7 +121,7 @@ impl CanaryEngine {
                 _ => "High-risk administrative lateral movement service",
             };
             format!(
-                "☠️ CRITICAL: Zero-day lateral movement / worm propagation attempt detected! Host {} (IP: {}) targeted sensitive internal port {} [{}] on destination {}. Autonomous quarantine recommended.",
+                "CRITICAL: Zero-day lateral movement / worm propagation attempt detected! Host {} (IP: {}) targeted sensitive internal port {} [{}] on destination {}. Autonomous quarantine recommended.",
                 src_mac, src_ip, dst_port, port_desc, dst_ip
             )
         };
