@@ -10,7 +10,8 @@ dashboard_port = 7777
 # If left commented or unset, Hearth auto-detects the local interface subnet
 # subnet = "192.168.1.0/24"
 
-# Optional: API key required for sensitive endpoints
+# Optional: API key required for sensitive mutating endpoints and dashboard access
+# Recommended in production environments to prevent unauthorized network control
 # api_key = "secret_auth_token"
 
 # Path to SQLite database file
@@ -39,7 +40,7 @@ notify_on_rogue_dhcp = true
 [threat_intel]
 enabled = true
 sync_interval_hours = 24
-# Automatically isolate/quarantine devices via nftables upon confirmed C2 botnet contact
+# Automatically isolate/quarantine devices via nftables upon confirmed C2 botnet contact, zero-day DGA, or lateral movement canary trip
 auto_quarantine = false
 feeds = [
     "https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
