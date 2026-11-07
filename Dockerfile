@@ -37,7 +37,7 @@ COPY --from=builder /usr/src/hearth/target/release/hearth-cli /usr/local/bin/hea
 # Create config directory
 RUN mkdir -p /etc/hearth /var/lib/hearth
 
-EXPOSE 7777
+EXPOSE 7777 53/udp 53/tcp
 
 ENTRYPOINT ["hearth"]
 CMD ["--config", "/etc/hearth/hearth.toml"]

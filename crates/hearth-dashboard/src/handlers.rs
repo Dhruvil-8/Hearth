@@ -448,3 +448,59 @@ pub async fn sync_dns_blocklist(State(state): State<AppState>) -> impl IntoRespo
         }
     }
 }
+
+/// GET /metrics or GET /api/metrics — Export Prometheus / OpenMetrics format for SIEM & Grafana monitoring.
+pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let devices = state.store.get_all_devices().unwrap_or_default();
+    let quarantined = state.store.get_quarantined_devices().unwrap_or_default();
+    let active_anomalies = state.store.get_unresolved_anomalies().unwrap_or_default();
+    let total_sent_today = state.store.get_total_bytes_sent_today().unwrap_or(0);
+    let (cti_total, _) = state.store.get_threat_intel_stats().unwrap_or((0, Vec::new()));
+    let dns_stats = state.store.get_dns_stats().unwrap_or(hearth_core::types::DnsStats {
+        total_queries: 0,
+        blocked_queries: 0,
+        total_blocked_domains: 0,
+        last_query_time: None,
+    });
+
+    let mut body = String::new();
+    body.push_str("# HELP hearth_devices_total Total number of discovered devices\n");
+    body.push_str("# TYPE hearth_devices_total gauge\n");
+    body.push_str(&format!("hearth_devices_total {}\n\n", devices.len()));
+
+    body.push_str("# HELP hearth_devices_quarantined Number of quarantined devices\n");
+    body.push_str("# TYPE hearth_devices_quarantined gauge\n");
+    body.push_str(&format!("hearth_devices_quarantined {}\n\n", quarantined.len()));
+
+    body.push_str("# HELP hearth_anomalies_active Active unresolved anomalies\n");
+    body.push_str("# TYPE hearth_anomalies_active gauge\n");
+    body.push_str(&format!("hearth_anomalies_active {}\n\n", active_anomalies.len()));
+
+    body.push_str("# HELP hearth_bytes_sent_today_total Total bytes sent today across all devices\n");
+    body.push_str("# TYPE hearth_bytes_sent_today_total counter\n");
+    body.push_str(&format!("hearth_bytes_sent_today_total {}\n\n", total_sent_today));
+
+    body.push_str("# HELP hearth_threat_intel_tracked_ips Number of tracked malicious IPs in CTI feed\n");
+    body.push_str("# TYPE hearth_threat_intel_tracked_ips gauge\n");
+    body.push_str(&format!("hearth_threat_intel_tracked_ips {}\n\n", cti_total));
+
+    body.push_str("# HELP hearth_dns_queries_total Total DNS queries handled by sinkhole\n");
+    body.push_str("# TYPE hearth_dns_queries_total counter\n");
+    body.push_str(&format!("hearth_dns_queries_total {}\n\n", dns_stats.total_queries));
+
+    body.push_str("# HELP hearth_dns_blocked_queries_total Total malicious/ad DNS queries blocked\n");
+    body.push_str("# TYPE hearth_dns_blocked_queries_total counter\n");
+    body.push_str(&format!("hearth_dns_blocked_queries_total {}\n\n", dns_stats.blocked_queries));
+
+    body.push_str("# HELP hearth_dns_blocked_domains_total Total domains in sinkhole blocklist\n");
+    body.push_str("# TYPE hearth_dns_blocked_domains_total gauge\n");
+    body.push_str(&format!("hearth_dns_blocked_domains_total {}\n", dns_stats.total_blocked_domains));
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}

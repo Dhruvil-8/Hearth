@@ -155,12 +155,14 @@ pub async fn serve(port: u16, store: Arc<Store>, config: Config) -> anyhow::Resu
         .route("/threat-intel", get(handlers::threat_intel))
         .route("/dns/stats", get(handlers::dns_stats))
         .route("/dns/queries", get(handlers::dns_queries))
+        .route("/metrics", get(handlers::metrics))
         .route("/ai/status", get(handlers::ai_status))
         .route("/ai/investigate/:mac", post(handlers::ai_investigate_device))
         .layer(middleware::from_fn_with_state(state.clone(), require_api_key));
 
     let app = Router::new()
         .route("/", get(handlers::index))
+        .route("/metrics", get(handlers::metrics))
         .nest("/api", api_routes)
         .layer(middleware::from_fn(security_headers_middleware))
         .layer(cors)
